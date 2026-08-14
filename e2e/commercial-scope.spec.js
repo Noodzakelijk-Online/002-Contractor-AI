@@ -23,6 +23,7 @@ async function approveQueueItem(page, title, reason) {
 }
 
 test('operator governs written scope, allowances, pricing, responsive review, and stale-source blocking', async ({ page, request }) => {
+  test.setTimeout(90_000);
   const key = Date.now();
   const title = `Browser commercial scope ${key}`;
   const intakeResponse = await request.post('/api/ledger/intake', {
@@ -42,9 +43,11 @@ test('operator governs written scope, allowances, pricing, responsive review, an
 
   const openJob = async () => {
     await page.goto('/');
-    await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: /^(Today|Vandaag)$/ })).toBeVisible();
     const openButton = page.getByRole('button', { name: `Open ${title}` }).first();
     await expect(openButton).toBeEnabled();
+    await page.getByLabel(/^(Language|Taal)$/).selectOption('en-GB');
+    await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible();
     await openButton.click();
     await expect(page.getByTestId('job-workspace').getByRole('heading', { name: title })).toBeVisible();
   };
@@ -215,6 +218,43 @@ test('operator governs written scope, allowances, pricing, responsive review, an
   await expect(estimateDialog.getByTestId('commercial-draft-scope')).toContainText('1 allowances');
   await estimateDialog.getByRole('button', { name: 'Cancel' }).click();
   await expect(estimateDialog).toBeHidden();
+
+  await page.getByLabel('Language', { exact: true }).selectOption('nl-NL');
+  await expect(commercial.getByRole('heading', { name: 'Commerciele beheersing' })).toBeVisible();
+  await expect(scopeControl.getByText('Kitchen renovation commercial scope', { exact: true })).toBeVisible();
+  await expect(scopeControl.getByRole('button', { name: 'Scope herzien' })).toBeVisible();
+  await expect(riskControl.getByText('Kitchen renovation project risks', { exact: true })).toBeVisible();
+  await expect(riskControl.getByRole('button', { name: "Risico's herzien" })).toBeVisible();
+  await expect(basisControl).toContainText('Vaste prijs');
+  await expect(commercial.getByRole('button', { name: 'Nieuwe calculatie' })).toBeEnabled();
+
+  await scopeControl.getByRole('button', { name: 'Scope herzien' }).click();
+  scopeDialog = page.getByTestId('commercial-scope-form');
+  await expect(scopeDialog.getByRole('heading', { name: 'Scope, aannames, uitsluitingen en stelposten' })).toBeVisible();
+  await expect(scopeDialog.getByLabel('Titel contractbijlage')).toHaveValue('Kitchen renovation commercial scope');
+  await scopeDialog.getByRole('button', { name: 'Annuleren' }).click();
+
+  await riskControl.getByRole('button', { name: "Risico's herzien" }).click();
+  const dutchRiskDialog = page.getByTestId('project-risk-register-form');
+  await expect(dutchRiskDialog.getByRole('heading', { name: 'Projectrisicoregister en premortem' })).toBeVisible();
+  await expect(dutchRiskDialog.getByLabel('Titel register')).toHaveValue('Kitchen renovation project risks');
+  await dutchRiskDialog.getByRole('button', { name: 'Annuleren' }).click();
+
+  await commercial.getByRole('button', { name: 'Opnieuw beoordelen' }).click();
+  const dutchPricingDialog = page.getByTestId('pricing-basis-form');
+  await expect(dutchPricingDialog.getByRole('heading', { name: 'Vaste prijs of regie' })).toBeVisible();
+  await expect(dutchPricingDialog.getByLabel('Onderbouwing beslissing')).toHaveValue('The approved scope and retained evidence support a fixed-price estimate.');
+  await dutchPricingDialog.getByRole('button', { name: 'Annuleren' }).click();
+
+  await commercial.getByRole('button', { name: 'Nieuwe calculatie' }).click();
+  const dutchEstimateDialog = page.getByTestId('commercial-draft-modal');
+  await expect(dutchEstimateDialog.getByRole('heading', { name: 'Nieuwe vasteprijscalculatie' })).toBeVisible();
+  await expect(dutchEstimateDialog.getByTestId('commercial-draft-scope')).toContainText('Kitchen renovation commercial scope');
+  await expect(dutchEstimateDialog.getByTestId('commercial-draft-pricing-basis')).toContainText('vaste prijs');
+  await dutchEstimateDialog.getByRole('button', { name: 'Annuleren' }).click();
+
+  await page.getByLabel('Taal', { exact: true }).selectOption('en-GB');
+  await expect(commercial.getByRole('heading', { name: 'Commercial control' })).toBeVisible();
 
   const takeoffResponse = await request.post(`/api/ledger/jobs/${intake.job.id}/takeoffs`, {
     data: {

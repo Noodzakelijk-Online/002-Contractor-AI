@@ -1551,6 +1551,7 @@ function DayworkControl({
 
 function CommercialControl({
   job,
+  locale,
   canCoordinate,
   canApprove,
   submitting,
@@ -1563,6 +1564,7 @@ function CommercialControl({
   onRequestRiskRegister,
   onRetainPricingBasis,
 }) {
+  const t = (key, variables = {}) => operatorText(locale, key, variables)
   const quotes = job.quotes || EMPTY_LIST
   const changeOrders = job.changeOrders || EMPTY_LIST
   const commercialScope = useMemo(() => job.commercialScope || {}, [job.commercialScope])
@@ -1794,34 +1796,40 @@ function CommercialControl({
       <div className="section-heading commercial-heading">
         <ReceiptEuro size={18} />
         <div>
-          <h3>Commercial control</h3>
-          <p>Separate internal approval from retained client acceptance before contract value changes.</p>
+          <h3>{t('Commercial control')}</h3>
+          <p>{t('Separate internal approval from retained client acceptance before contract value changes.')}</p>
         </div>
       </div>
       <div className={`scope-definition-strip ${commercialScopeReady ? 'scope-definition-active' : 'scope-definition-missing'}`} data-testid="commercial-scope-control">
         <ClipboardList size={18} />
         <div className="scope-definition-copy">
           <div>
-            <strong>{commercialScopeReady ? currentScope.title : pendingScope ? 'Commercial scope awaiting approval' : commercialScope.stale ? 'Commercial scope requires revision' : 'Commercial scope not retained'}</strong>
+            <strong>{commercialScopeReady ? currentScope.title : pendingScope ? t('Commercial scope awaiting approval') : commercialScope.stale ? t('Commercial scope requires revision') : t('Commercial scope not retained')}</strong>
             {currentScope ? <span className="tag">v{currentScope.versionNumber}</span> : null}
-            {pendingScope ? <span className="tag tag-amber">v{pendingScope.versionNumber} pending</span> : null}
+            {pendingScope ? <span className="tag tag-amber">v{pendingScope.versionNumber} {t('pending')}</span> : null}
           </div>
           <span>
             {commercialScopeReady
-              ? `${currentScope.snapshot?.inclusions?.length || 0} inclusions / ${currentScope.snapshot?.assumptions?.length || 0} assumptions / ${currentScope.snapshot?.exclusions?.length || 0} exclusions / ${currentScope.snapshot?.allowances?.length || 0} allowances totaling ${rateMoney(currentScope.allowanceTotal, currentScope.currency)}`
+              ? t('{inclusions} inclusions / {assumptions} assumptions / {exclusions} exclusions / {allowances} allowances totaling {total}', {
+                  inclusions: currentScope.snapshot?.inclusions?.length || 0,
+                  assumptions: currentScope.snapshot?.assumptions?.length || 0,
+                  exclusions: currentScope.snapshot?.exclusions?.length || 0,
+                  allowances: currentScope.snapshot?.allowances?.length || 0,
+                  total: rateMoney(currentScope.allowanceTotal, currentScope.currency),
+                })
               : pendingScope
-                ? 'Pricing and quote approval remain blocked until an approver accepts this exact source-bound revision.'
-                : 'Write the promised work, assumptions, exclusions, responsibilities, and allowance reconciliation before selecting a pricing model.'}
+                ? t('Pricing and quote approval remain blocked until an approver accepts this exact source-bound revision.')
+                : t('Write the promised work, assumptions, exclusions, responsibilities, and allowance reconciliation before selecting a pricing model.')}
           </span>
         </div>
-        {commercialScope.stale ? <span className="tag tag-amber">Source changed</span> : commercialScopeReady ? <span className="tag tag-green">Approved + current</span> : null}
+        {commercialScope.stale ? <span className="tag tag-amber">{t('Source changed')}</span> : commercialScopeReady ? <span className="tag tag-green">{t('Approved + current')}</span> : null}
         {pendingScopeApproval && canApprove ? (
           <button type="button" className="secondary-button" disabled={submitting} onClick={() => onOpenApprovals({ approvalId: pendingScopeApproval.id })}>
-            <ShieldCheck size={14} />Review scope
+            <ShieldCheck size={14} />{t('Review scope')}
           </button>
         ) : canCoordinate ? (
-          <button type="button" className="secondary-button" disabled={submitting || Boolean(pendingScope)} title={pendingScope ? 'Resolve the pending scope revision first' : currentScope ? 'Prepare a new source-bound revision' : 'Prepare the initial commercial scope'} onClick={openCommercialScopeEditor}>
-            <ClipboardPenLine size={14} />{currentScope ? 'Revise scope' : 'Write scope'}
+          <button type="button" className="secondary-button" disabled={submitting || Boolean(pendingScope)} title={pendingScope ? t('Resolve the pending scope revision first') : currentScope ? t('Prepare a new source-bound revision') : t('Prepare the initial commercial scope')} onClick={openCommercialScopeEditor}>
+            <ClipboardPenLine size={14} />{currentScope ? t('Revise scope') : t('Write scope')}
           </button>
         ) : null}
       </div>
@@ -1829,26 +1837,31 @@ function CommercialControl({
         <TriangleAlert size={18} />
         <div className="project-risk-copy">
           <div>
-            <strong>{riskRegisterReady ? currentRiskRegister.title : pendingRiskRegister ? 'Project risk review awaiting approval' : riskRegister.stale ? 'Project risk review requires revision' : 'Project risk register not retained'}</strong>
+            <strong>{riskRegisterReady ? currentRiskRegister.title : pendingRiskRegister ? t('Project risk review awaiting approval') : riskRegister.stale ? t('Project risk review requires revision') : t('Project risk register not retained')}</strong>
             {currentRiskRegister ? <span className="tag">v{currentRiskRegister.versionNumber}</span> : null}
-            {pendingRiskRegister ? <span className="tag tag-amber">v{pendingRiskRegister.versionNumber} pending</span> : null}
+            {pendingRiskRegister ? <span className="tag tag-amber">v{pendingRiskRegister.versionNumber} {t('pending')}</span> : null}
           </div>
           <span>
             {riskRegisterReady
-              ? `${currentRiskRegister.riskCount} risks / ${currentRiskRegister.highRiskCount} high residual / ${rateMoney(currentRiskRegister.totalExpectedValue, currentRiskRegister.currency)} expected exposure / ${currentRiskRegister.snapshot?.summary?.premortemFailureModeCount || 0} premortem modes`
+              ? t('{risks} risks / {high} high residual / {exposure} expected exposure / {modes} premortem modes', {
+                  risks: currentRiskRegister.riskCount,
+                  high: currentRiskRegister.highRiskCount,
+                  exposure: rateMoney(currentRiskRegister.totalExpectedValue, currentRiskRegister.currency),
+                  modes: currentRiskRegister.snapshot?.summary?.premortemFailureModeCount || 0,
+                })
               : pendingRiskRegister
-                ? 'Pricing and quote approval remain blocked until an approver verifies ownership, treatments, exposure, and premortem links.'
-                : 'Run the premortem, identify causes, events, consequences, owners, triggers, treatments, and residual exposure before pricing.'}
+                ? t('Pricing and quote approval remain blocked until an approver verifies ownership, treatments, exposure, and premortem links.')
+                : t('Run the premortem, identify causes, events, consequences, owners, triggers, treatments, and residual exposure before pricing.')}
           </span>
         </div>
-        {riskRegister.stale ? <span className="tag tag-amber">Source changed</span> : riskRegisterReady ? <span className="tag tag-green">Approved + current</span> : null}
+        {riskRegister.stale ? <span className="tag tag-amber">{t('Source changed')}</span> : riskRegisterReady ? <span className="tag tag-green">{t('Approved + current')}</span> : null}
         {pendingRiskApproval && canApprove ? (
           <button type="button" className="secondary-button" disabled={submitting} onClick={() => onOpenApprovals({ approvalId: pendingRiskApproval.id })}>
-            <ShieldCheck size={14} />Review risks
+            <ShieldCheck size={14} />{t('Review risks')}
           </button>
         ) : canCoordinate ? (
-          <button type="button" className="secondary-button" disabled={submitting || !commercialScopeReady || Boolean(pendingRiskRegister)} title={!commercialScopeReady ? 'Approve the commercial scope first' : pendingRiskRegister ? 'Resolve the pending risk revision first' : 'Prepare a source-bound project risk review'} onClick={() => { setRiskDraft(projectRiskDraft(job, riskRegister)); setEditingRiskRegister(true) }}>
-            <ClipboardPenLine size={14} />{currentRiskRegister ? 'Revise risks' : 'Run premortem'}
+          <button type="button" className="secondary-button" disabled={submitting || !commercialScopeReady || Boolean(pendingRiskRegister)} title={!commercialScopeReady ? t('Approve the commercial scope first') : pendingRiskRegister ? t('Resolve the pending risk revision first') : t('Prepare a source-bound project risk review')} onClick={() => { setRiskDraft(projectRiskDraft(job, riskRegister)); setEditingRiskRegister(true) }}>
+            <ClipboardPenLine size={14} />{currentRiskRegister ? t('Revise risks') : t('Run premortem')}
           </button>
         ) : null}
       </div>
@@ -1856,39 +1869,39 @@ function CommercialControl({
         <GitBranch size={18} />
         <div className="pricing-basis-copy">
           <div>
-            <strong>{pricingBasisReady ? pricingModelLabel(currentPricingBasis.selectedModel) : pricingBasis.stale ? 'Commercial basis requires reassessment' : 'Commercial pricing basis not retained'}</strong>
+            <strong>{pricingBasisReady ? t(pricingModelLabel(currentPricingBasis.selectedModel)) : pricingBasis.stale ? t('Commercial basis requires reassessment') : t('Commercial pricing basis not retained')}</strong>
             {currentPricingBasis ? <span className="tag">v{currentPricingBasis.versionNumber}</span> : null}
-            {currentPricingBasis?.snapshot?.override ? <span className="tag tag-amber">Override</span> : null}
+            {currentPricingBasis?.snapshot?.override ? <span className="tag tag-amber">{t('Override')}</span> : null}
           </div>
           <span>
             {currentPricingBasis
-              ? `${currentPricingBasis.score}% fixed-price readiness / recommendation ${pricingModelLabel(currentPricingBasis.recommendation).toLowerCase()} / ${currentPricingBasis.snapshot?.rationale || 'No rationale retained'}`
-              : 'No quote can enter approval until the current scope, quantities, site conditions, selections, productivity, schedule, price exposure, and change risk have been assessed.'}
+              ? t('{score}% fixed-price readiness / recommendation {recommendation} / {rationale}', { score: currentPricingBasis.score, recommendation: t(pricingModelLabel(currentPricingBasis.recommendation)).toLowerCase(), rationale: currentPricingBasis.snapshot?.rationale || t('No rationale retained') })
+              : t('No quote can enter approval until the current scope, quantities, site conditions, selections, productivity, schedule, price exposure, and change risk have been assessed.')}
           </span>
         </div>
-        {pricingBasis.stale ? <span className="tag tag-amber">Source changed</span> : pricingBasisReady ? <span className="tag tag-green">Source current</span> : null}
+        {pricingBasis.stale ? <span className="tag tag-amber">{t('Source changed')}</span> : pricingBasisReady ? <span className="tag tag-green">{t('Source current')}</span> : null}
         {canCoordinate ? (
-          <button type="button" className="secondary-button" disabled={submitting || !commercialScopeReady || !riskRegisterReady} title={commercialScopeReady && riskRegisterReady ? 'Assess the current approved scope and project risk register' : 'Approve a current commercial scope and project risk register first'} onClick={openPricingBasisEditor}>
+          <button type="button" className="secondary-button" disabled={submitting || !commercialScopeReady || !riskRegisterReady} title={commercialScopeReady && riskRegisterReady ? t('Assess the current approved scope and project risk register') : t('Approve a current commercial scope and project risk register first')} onClick={openPricingBasisEditor}>
             <ClipboardPenLine size={14} />
-            {currentPricingBasis ? 'Reassess' : 'Assess basis'}
+            {currentPricingBasis ? t('Reassess') : t('Assess basis')}
           </button>
         ) : null}
       </div>
-      <div className="commercial-summary" aria-label="Accepted commercial value">
+      <div className="commercial-summary" aria-label={t('Accepted commercial value')}>
         <div>
-          <span>{acceptedPricingModel === 'time_and_materials' ? 'Recorded contract value' : 'Accepted contract net'}</span>
+          <span>{acceptedPricingModel === 'time_and_materials' ? t('Recorded contract value') : t('Accepted contract net')}</span>
           <strong>{currency.format(job.contractValue || 0)}</strong>
         </div>
         <div>
-          <span>{acceptedPricingModel === 'time_and_materials' ? 'Accepted T&M budget' : 'Accepted quote'}</span>
-          <strong>{acceptedQuote ? currency.format(acceptedQuote.subtotal || 0) : 'Not retained'}</strong>
+          <span>{acceptedPricingModel === 'time_and_materials' ? t('Accepted T&M budget') : t('Accepted quote')}</span>
+          <strong>{acceptedQuote ? currency.format(acceptedQuote.subtotal || 0) : t('Not retained')}</strong>
         </div>
         <div>
-          <span>Accepted changes</span>
+          <span>{t('Accepted changes')}</span>
           <strong>{currency.format(acceptedChangeNet)}</strong>
         </div>
         <div>
-          <span>Pending decisions</span>
+          <span>{t('Pending decisions')}</span>
           <strong>
             {
               pendingApprovals.filter((approval) =>
@@ -1900,13 +1913,13 @@ function CommercialControl({
       </div>
       {canCoordinate ? (
         <div className="commercial-actions">
-          <button type="button" className="secondary-button" disabled={submitting || !commercialScopeReady || !riskRegisterReady || !pricingBasisReady} title={commercialScopeReady && riskRegisterReady && pricingBasisReady ? `Create a ${pricingModelLabel(currentPricingBasis.selectedModel).toLowerCase()} estimate` : 'Approve current scope and risk revisions and retain a current pricing-basis decision first'} onClick={onNewQuote}>
+          <button type="button" className="secondary-button" disabled={submitting || !commercialScopeReady || !riskRegisterReady || !pricingBasisReady} title={commercialScopeReady && riskRegisterReady && pricingBasisReady ? t('Create a {model} estimate', { model: t(pricingModelLabel(currentPricingBasis.selectedModel)).toLowerCase() }) : t('Approve current scope and risk revisions and retain a current pricing-basis decision first')} onClick={onNewQuote}>
             <Plus size={15} />
-            New estimate
+            {t('New estimate')}
           </button>
           <button type="button" className="secondary-button" disabled={submitting} onClick={onNewChangeOrder}>
             <Plus size={15} />
-            Scope change
+            {t('Scope change')}
           </button>
         </div>
       ) : null}
@@ -1915,69 +1928,69 @@ function CommercialControl({
           <form className="modal commercial-scope-modal" role="dialog" aria-modal="true" aria-labelledby="commercial-scope-title" data-testid="commercial-scope-form" onSubmit={submitCommercialScope}>
             <div className="modal-heading">
               <div>
-                <p className="eyebrow">Approval-gated contract schedule</p>
-                <h2 id="commercial-scope-title">Scope, assumptions, exclusions, and allowances</h2>
-                <p>{job.title} / source-bound revision {Number(currentScope?.versionNumber || 0) + 1}</p>
+                <p className="eyebrow">{t('Approval-gated contract schedule')}</p>
+                <h2 id="commercial-scope-title">{t('Scope, assumptions, exclusions, and allowances')}</h2>
+                <p>{job.title} / {t('source-bound revision {version}', { version: Number(currentScope?.versionNumber || 0) + 1 })}</p>
               </div>
-              <button type="button" className="icon-button" aria-label="Close commercial scope" onClick={() => setEditingCommercialScope(false)}><X size={17} /></button>
+              <button type="button" className="icon-button" aria-label={t('Close commercial scope')} onClick={() => setEditingCommercialScope(false)}><X size={17} /></button>
             </div>
             <div className="commercial-scope-body">
               <div className="commercial-scope-overview">
-                <label>Schedule title<input required minLength="3" maxLength="160" value={scopeDraft.title} onChange={(event) => setScopeDraft({ ...scopeDraft, title: event.target.value })} /></label>
-                <label>Clarification deadline<input type="date" value={scopeDraft.clarificationDeadline} onChange={(event) => setScopeDraft({ ...scopeDraft, clarificationDeadline: event.target.value })} /></label>
-                <label className="scope-wide">Scope summary<textarea required minLength="12" maxLength="4000" rows={4} value={scopeDraft.scopeSummary} onChange={(event) => setScopeDraft({ ...scopeDraft, scopeSummary: event.target.value })} placeholder="Describe the complete work boundary and intended outcome." /></label>
+                <label>{t('Schedule title')}<input required minLength="3" maxLength="160" value={scopeDraft.title} onChange={(event) => setScopeDraft({ ...scopeDraft, title: event.target.value })} /></label>
+                <label>{t('Clarification deadline')}<input type="date" value={scopeDraft.clarificationDeadline} onChange={(event) => setScopeDraft({ ...scopeDraft, clarificationDeadline: event.target.value })} /></label>
+                <label className="scope-wide">{t('Scope summary')}<textarea required minLength="12" maxLength="4000" rows={4} value={scopeDraft.scopeSummary} onChange={(event) => setScopeDraft({ ...scopeDraft, scopeSummary: event.target.value })} placeholder={t('Describe the complete work boundary and intended outcome.')} /></label>
               </div>
               <div className="commercial-scope-lists">
-                <label>Included work<textarea required rows={6} value={scopeDraft.inclusions} onChange={(event) => setScopeDraft({ ...scopeDraft, inclusions: event.target.value })} placeholder="One explicit inclusion per line" /></label>
-                <label>Assumptions<textarea required rows={6} value={scopeDraft.assumptions} onChange={(event) => setScopeDraft({ ...scopeDraft, assumptions: event.target.value })} placeholder="One estimating or delivery assumption per line" /></label>
-                <label>Exclusions<textarea required rows={6} value={scopeDraft.exclusions} onChange={(event) => setScopeDraft({ ...scopeDraft, exclusions: event.target.value })} placeholder="One explicit exclusion per line" /></label>
-                <label>Client responsibilities<textarea rows={6} value={scopeDraft.clientResponsibilities} onChange={(event) => setScopeDraft({ ...scopeDraft, clientResponsibilities: event.target.value })} placeholder="Access, selections, utilities, approvals, or enabling work" /></label>
-                <label>Contractor responsibilities<textarea rows={6} value={scopeDraft.contractorResponsibilities} onChange={(event) => setScopeDraft({ ...scopeDraft, contractorResponsibilities: event.target.value })} placeholder="Protection, coordination, cleanup, evidence, or handover" /></label>
+                <label>{t('Included work')}<textarea required rows={6} value={scopeDraft.inclusions} onChange={(event) => setScopeDraft({ ...scopeDraft, inclusions: event.target.value })} placeholder={t('One explicit inclusion per line')} /></label>
+                <label>{t('Assumptions')}<textarea required rows={6} value={scopeDraft.assumptions} onChange={(event) => setScopeDraft({ ...scopeDraft, assumptions: event.target.value })} placeholder={t('One estimating or delivery assumption per line')} /></label>
+                <label>{t('Exclusions')}<textarea required rows={6} value={scopeDraft.exclusions} onChange={(event) => setScopeDraft({ ...scopeDraft, exclusions: event.target.value })} placeholder={t('One explicit exclusion per line')} /></label>
+                <label>{t('Client responsibilities')}<textarea rows={6} value={scopeDraft.clientResponsibilities} onChange={(event) => setScopeDraft({ ...scopeDraft, clientResponsibilities: event.target.value })} placeholder={t('Access, selections, utilities, approvals, or enabling work')} /></label>
+                <label>{t('Contractor responsibilities')}<textarea rows={6} value={scopeDraft.contractorResponsibilities} onChange={(event) => setScopeDraft({ ...scopeDraft, contractorResponsibilities: event.target.value })} placeholder={t('Protection, coordination, cleanup, evidence, or handover')} /></label>
               </div>
               <fieldset className="pricing-model-fieldset scope-allowance-mode">
-                <legend>Allowance treatment</legend>
+                <legend>{t('Allowance treatment')}</legend>
                 <div className="pricing-model-options">
-                  <label className={scopeDraft.allowanceMode === 'none' ? 'selected' : ''}><input type="radio" name="scope-allowance-mode" value="none" checked={scopeDraft.allowanceMode === 'none'} onChange={() => setScopeDraft({ ...scopeDraft, allowanceMode: 'none', allowances: [] })} /><span>No allowances</span></label>
-                  <label className={scopeDraft.allowanceMode === 'defined' ? 'selected' : ''}><input type="radio" name="scope-allowance-mode" value="defined" checked={scopeDraft.allowanceMode === 'defined'} onChange={() => setScopeDraft({ ...scopeDraft, allowanceMode: 'defined', allowances: scopeDraft.allowances.length ? scopeDraft.allowances : [emptyScopeAllowance()] })} /><span>Defined allowances</span></label>
+                  <label className={scopeDraft.allowanceMode === 'none' ? 'selected' : ''}><input type="radio" name="scope-allowance-mode" value="none" checked={scopeDraft.allowanceMode === 'none'} onChange={() => setScopeDraft({ ...scopeDraft, allowanceMode: 'none', allowances: [] })} /><span>{t('No allowances')}</span></label>
+                  <label className={scopeDraft.allowanceMode === 'defined' ? 'selected' : ''}><input type="radio" name="scope-allowance-mode" value="defined" checked={scopeDraft.allowanceMode === 'defined'} onChange={() => setScopeDraft({ ...scopeDraft, allowanceMode: 'defined', allowances: scopeDraft.allowances.length ? scopeDraft.allowances : [emptyScopeAllowance()] })} /><span>{t('Defined allowances')}</span></label>
                 </div>
               </fieldset>
               {scopeDraft.allowanceMode === 'none' ? (
-                <label className="scope-no-allowance">No-allowance statement<textarea required minLength="8" maxLength="500" rows={3} value={scopeDraft.noAllowanceReason} onChange={(event) => setScopeDraft({ ...scopeDraft, noAllowanceReason: event.target.value })} /></label>
+                <label className="scope-no-allowance">{t('No-allowance statement')}<textarea required minLength="8" maxLength="500" rows={3} value={scopeDraft.noAllowanceReason} onChange={(event) => setScopeDraft({ ...scopeDraft, noAllowanceReason: event.target.value })} /></label>
               ) : (
                 <section className="scope-allowance-section" aria-labelledby="scope-allowance-title">
                   <div className="commercial-line-heading">
-                    <div><h3 id="scope-allowance-title">Allowances and provisional sums</h3><p>Each amount is server-recalculated from quantity and unit rate.</p></div>
-                    <button type="button" className="secondary-button" onClick={() => setScopeDraft((current) => ({ ...current, allowances: [...current.allowances, emptyScopeAllowance(current.allowances.length)] }))}><Plus size={14} />Add allowance</button>
+                    <div><h3 id="scope-allowance-title">{t('Allowances and provisional sums')}</h3><p>{t('Each amount is server-recalculated from quantity and unit rate.')}</p></div>
+                    <button type="button" className="secondary-button" onClick={() => setScopeDraft((current) => ({ ...current, allowances: [...current.allowances, emptyScopeAllowance(current.allowances.length)] }))}><Plus size={14} />{t('Add allowance')}</button>
                   </div>
                   <div className="scope-allowance-list">
                     {scopeDraft.allowances.map((allowance, index) => (
                       <fieldset className="scope-allowance-row" key={`${allowance.allowanceKey}-${index}`}>
-                        <legend>Allowance {index + 1}</legend>
-                        <label>Key<input required maxLength="40" value={allowance.allowanceKey} onChange={(event) => updateScopeAllowance(index, { allowanceKey: event.target.value.toUpperCase() })} /></label>
-                        <label>Type<select value={allowance.allowanceType} onChange={(event) => updateScopeAllowance(index, { allowanceType: event.target.value })}><option value="selection_allowance">Selection allowance</option><option value="provisional_sum">Provisional sum</option><option value="unit_rate">Unit rate</option></select></label>
-                        <label className="scope-allowance-title-field">Title<input required minLength="3" maxLength="160" value={allowance.title} onChange={(event) => updateScopeAllowance(index, { title: event.target.value })} /></label>
-                        <label className="scope-allowance-description">Description<textarea required minLength="3" maxLength="500" rows={2} value={allowance.description} onChange={(event) => updateScopeAllowance(index, { description: event.target.value })} /></label>
-                        <label>Quantity<input required type="number" min="0.0001" max="1000000" step="0.0001" value={allowance.quantity} onChange={(event) => updateScopeAllowance(index, { quantity: event.target.value })} /></label>
-                        <label>Unit<input required maxLength="40" value={allowance.unit} onChange={(event) => updateScopeAllowance(index, { unit: event.target.value })} /></label>
-                        <label>Unit rate<input required type="number" min="0" max="1000000000" step="0.01" value={allowance.unitRate} onChange={(event) => updateScopeAllowance(index, { unitRate: event.target.value })} /></label>
-                        <label>Reconciliation<select value={allowance.reconciliationMethod} onChange={(event) => updateScopeAllowance(index, { reconciliationMethod: event.target.value })}><option value="actual_cost_variation">Actual cost variation</option><option value="fixed_included">Fixed included amount</option><option value="remeasured_unit_rate">Remeasured unit rate</option></select></label>
-                        <label>Selection by<select value={allowance.selectionBy} onChange={(event) => updateScopeAllowance(index, { selectionBy: event.target.value })}><option value="client">Client</option><option value="contractor">Contractor</option><option value="joint">Joint</option></select></label>
-                        <label>Selection due<input type="date" value={allowance.dueAt} onChange={(event) => updateScopeAllowance(index, { dueAt: event.target.value })} /></label>
-                        <label className="scope-allowance-description">Evidence reference<input maxLength="500" value={allowance.evidenceReference} onChange={(event) => updateScopeAllowance(index, { evidenceReference: event.target.value })} placeholder="Drawing, survey, supplier quotation, or selection reference" /></label>
-                        <div className="scope-allowance-calculated"><span>Calculated amount</span><strong>{rateMoney((Number(allowance.quantity) || 0) * (Number(allowance.unitRate) || 0))}</strong></div>
-                        <button type="button" className="icon-button scope-allowance-remove" aria-label={`Remove allowance ${index + 1}`} onClick={() => setScopeDraft((current) => ({ ...current, allowances: current.allowances.filter((_, allowanceIndex) => allowanceIndex !== index) }))}><X size={15} /></button>
+                        <legend>{t('Allowance {number}', { number: index + 1 })}</legend>
+                        <label>{t('Key')}<input required maxLength="40" value={allowance.allowanceKey} onChange={(event) => updateScopeAllowance(index, { allowanceKey: event.target.value.toUpperCase() })} /></label>
+                        <label>{t('Type')}<select value={allowance.allowanceType} onChange={(event) => updateScopeAllowance(index, { allowanceType: event.target.value })}><option value="selection_allowance">{t('Selection allowance')}</option><option value="provisional_sum">{t('Provisional sum')}</option><option value="unit_rate">{t('Unit rate')}</option></select></label>
+                        <label className="scope-allowance-title-field">{t('Title')}<input required minLength="3" maxLength="160" value={allowance.title} onChange={(event) => updateScopeAllowance(index, { title: event.target.value })} /></label>
+                        <label className="scope-allowance-description">{t('Description')}<textarea required minLength="3" maxLength="500" rows={2} value={allowance.description} onChange={(event) => updateScopeAllowance(index, { description: event.target.value })} /></label>
+                        <label>{t('Quantity')}<input required type="number" min="0.0001" max="1000000" step="0.0001" value={allowance.quantity} onChange={(event) => updateScopeAllowance(index, { quantity: event.target.value })} /></label>
+                        <label>{t('Unit')}<input required maxLength="40" value={allowance.unit} onChange={(event) => updateScopeAllowance(index, { unit: event.target.value })} /></label>
+                        <label>{t('Unit rate')}<input required type="number" min="0" max="1000000000" step="0.01" value={allowance.unitRate} onChange={(event) => updateScopeAllowance(index, { unitRate: event.target.value })} /></label>
+                        <label>{t('Reconciliation')}<select value={allowance.reconciliationMethod} onChange={(event) => updateScopeAllowance(index, { reconciliationMethod: event.target.value })}><option value="actual_cost_variation">{t('Actual cost variation')}</option><option value="fixed_included">{t('Fixed included amount')}</option><option value="remeasured_unit_rate">{t('Remeasured unit rate')}</option></select></label>
+                        <label>{t('Selection by')}<select value={allowance.selectionBy} onChange={(event) => updateScopeAllowance(index, { selectionBy: event.target.value })}><option value="client">{t('Client')}</option><option value="contractor">{t('Contractor')}</option><option value="joint">{t('Joint')}</option></select></label>
+                        <label>{t('Selection due')}<input type="date" value={allowance.dueAt} onChange={(event) => updateScopeAllowance(index, { dueAt: event.target.value })} /></label>
+                        <label className="scope-allowance-description">{t('Evidence reference')}<input maxLength="500" value={allowance.evidenceReference} onChange={(event) => updateScopeAllowance(index, { evidenceReference: event.target.value })} placeholder={t('Drawing, survey, supplier quotation, or selection reference')} /></label>
+                        <div className="scope-allowance-calculated"><span>{t('Calculated amount')}</span><strong>{rateMoney((Number(allowance.quantity) || 0) * (Number(allowance.unitRate) || 0))}</strong></div>
+                        <button type="button" className="icon-button scope-allowance-remove" aria-label={t('Remove allowance {number}', { number: index + 1 })} onClick={() => setScopeDraft((current) => ({ ...current, allowances: current.allowances.filter((_, allowanceIndex) => allowanceIndex !== index) }))}><X size={15} /></button>
                       </fieldset>
                     ))}
                   </div>
-                  <div className="scope-allowance-total"><span>Total retained allowance</span><strong>{rateMoney(scopeAllowanceTotal)}</strong></div>
+                  <div className="scope-allowance-total"><span>{t('Total retained allowance')}</span><strong>{rateMoney(scopeAllowanceTotal)}</strong></div>
                 </section>
               )}
-              <label className="pricing-basis-textarea">Revision reason<textarea required minLength="8" maxLength="500" value={scopeDraft.reason} onChange={(event) => setScopeDraft({ ...scopeDraft, reason: event.target.value })} placeholder="Explain why this scope revision is being requested." /></label>
-              <p className="workflow-note">Approval activates this revision as the exact source for pricing and quotes. It does not send terms, accept client instructions, authorize changed work, commit spend or dates, invoice, or move funds.</p>
+              <label className="pricing-basis-textarea">{t('Revision reason')}<textarea required minLength="8" maxLength="500" value={scopeDraft.reason} onChange={(event) => setScopeDraft({ ...scopeDraft, reason: event.target.value })} placeholder={t('Explain why this scope revision is being requested.')} /></label>
+              <p className="workflow-note">{t('Approval activates this revision as the exact source for pricing and quotes. It does not send terms, accept client instructions, authorize changed work, commit spend or dates, invoice, or move funds.')}</p>
             </div>
             <div className="modal-actions">
-              <button type="button" className="secondary-button" onClick={() => setEditingCommercialScope(false)}>Cancel</button>
-              <button className="primary-button" disabled={submitting || !scopeDraftReady}><ShieldCheck size={15} />{submitting ? 'Requesting...' : 'Request approval'}</button>
+              <button type="button" className="secondary-button" onClick={() => setEditingCommercialScope(false)}>{t('Cancel')}</button>
+              <button className="primary-button" disabled={submitting || !scopeDraftReady}><ShieldCheck size={15} />{submitting ? t('Requesting...') : t('Request approval')}</button>
             </div>
           </form>
         </div>
@@ -1987,35 +2000,35 @@ function CommercialControl({
           <form className="modal project-risk-modal" role="dialog" aria-modal="true" aria-labelledby="project-risk-title" data-testid="project-risk-register-form" onSubmit={submitRiskRegister}>
             <div className="modal-heading">
               <div>
-                <p className="eyebrow">Approval-gated project review</p>
-                <h2 id="project-risk-title">Project risk register and premortem</h2>
-                <p>{job.title} / source-bound revision {Number(currentRiskRegister?.versionNumber || 0) + 1}</p>
+                <p className="eyebrow">{t('Approval-gated project review')}</p>
+                <h2 id="project-risk-title">{t('Project risk register and premortem')}</h2>
+                <p>{job.title} / {t('source-bound revision {version}', { version: Number(currentRiskRegister?.versionNumber || 0) + 1 })}</p>
               </div>
-              <button type="button" className="icon-button" aria-label="Close project risk register" onClick={() => setEditingRiskRegister(false)}><X size={17} /></button>
+              <button type="button" className="icon-button" aria-label={t('Close project risk register')} onClick={() => setEditingRiskRegister(false)}><X size={17} /></button>
             </div>
             <div className="project-risk-modal-body">
-              <div className="project-risk-summary" aria-label="Draft project risk summary">
-                <div><span>Risks</span><strong>{riskDraft.risks.length}</strong></div>
-                <div><span>High residual</span><strong>{riskDraft.risks.filter((risk) => projectRiskScore(risk, true) >= 15).length}</strong></div>
-                <div><span>Expected exposure</span><strong>{rateMoney(riskDraft.risks.reduce((sum, risk) => sum + ((Number(risk.costExposureAmount) || 0) * ({ 1: 0.1, 2: 0.3, 3: 0.5, 4: 0.7, 5: 0.9 }[Number(risk.residualProbability)] || 0)), 0))}</strong></div>
-                <div><span>Schedule exposure</span><strong>{Math.max(0, ...riskDraft.risks.map((risk) => Number(risk.scheduleExposureDays) || 0))} days</strong></div>
+              <div className="project-risk-summary" aria-label={t('Draft project risk summary')}>
+                <div><span>{t('Risks')}</span><strong>{riskDraft.risks.length}</strong></div>
+                <div><span>{t('High residual')}</span><strong>{riskDraft.risks.filter((risk) => projectRiskScore(risk, true) >= 15).length}</strong></div>
+                <div><span>{t('Expected exposure')}</span><strong>{rateMoney(riskDraft.risks.reduce((sum, risk) => sum + ((Number(risk.costExposureAmount) || 0) * ({ 1: 0.1, 2: 0.3, 3: 0.5, 4: 0.7, 5: 0.9 }[Number(risk.residualProbability)] || 0)), 0))}</strong></div>
+                <div><span>{t('Schedule exposure')}</span><strong>{t('{days} days', { days: Math.max(0, ...riskDraft.risks.map((risk) => Number(risk.scheduleExposureDays) || 0)) })}</strong></div>
               </div>
               <section className="premortem-workshop" aria-labelledby="premortem-workshop-title">
                 <div className="commercial-line-heading">
-                  <div><h3 id="premortem-workshop-title">Premortem workshop</h3><p>Assume the project failed, then link each failure mode to a controlled risk.</p></div>
+                  <div><h3 id="premortem-workshop-title">{t('Premortem workshop')}</h3><p>{t('Assume the project failed, then link each failure mode to a controlled risk.')}</p></div>
                 </div>
                 <div className="premortem-fields">
-                  <label>Register title<input required minLength="3" maxLength="160" value={riskDraft.title} onChange={(event) => setRiskDraft({ ...riskDraft, title: event.target.value })} /></label>
-                  <label>Workshop date<input required type="date" value={riskDraft.workshopDate} onChange={(event) => setRiskDraft({ ...riskDraft, workshopDate: event.target.value })} /></label>
-                  <label>Facilitator<input required minLength="2" maxLength="160" value={riskDraft.facilitator} onChange={(event) => setRiskDraft({ ...riskDraft, facilitator: event.target.value })} /></label>
-                  <label className="project-risk-wide">Failure statement<textarea required minLength="12" maxLength="2000" rows={3} value={riskDraft.failureStatement} onChange={(event) => setRiskDraft({ ...riskDraft, failureStatement: event.target.value })} placeholder="The project failed because..." /></label>
-                  <label className="project-risk-wide">Participants<textarea required rows={3} value={riskDraft.participants} onChange={(event) => setRiskDraft({ ...riskDraft, participants: event.target.value })} placeholder="One participant per line" /></label>
+                  <label>{t('Register title')}<input required minLength="3" maxLength="160" value={riskDraft.title} onChange={(event) => setRiskDraft({ ...riskDraft, title: event.target.value })} /></label>
+                  <label>{t('Workshop date')}<input required type="date" value={riskDraft.workshopDate} onChange={(event) => setRiskDraft({ ...riskDraft, workshopDate: event.target.value })} /></label>
+                  <label>{t('Facilitator')}<input required minLength="2" maxLength="160" value={riskDraft.facilitator} onChange={(event) => setRiskDraft({ ...riskDraft, facilitator: event.target.value })} /></label>
+                  <label className="project-risk-wide">{t('Failure statement')}<textarea required minLength="12" maxLength="2000" rows={3} value={riskDraft.failureStatement} onChange={(event) => setRiskDraft({ ...riskDraft, failureStatement: event.target.value })} placeholder={t('The project failed because...')} /></label>
+                  <label className="project-risk-wide">{t('Participants')}<textarea required rows={3} value={riskDraft.participants} onChange={(event) => setRiskDraft({ ...riskDraft, participants: event.target.value })} placeholder={t('One participant per line')} /></label>
                 </div>
               </section>
               <section className="project-risk-editor" aria-labelledby="project-risk-editor-title">
                 <div className="commercial-line-heading">
-                  <div><h3 id="project-risk-editor-title">Risk treatments and failure modes</h3><p>Probability and impact use a 1 to 5 scale. Scores and monetary exposure are recalculated by the server.</p></div>
-                  <button type="button" className="secondary-button" onClick={() => setRiskDraft((current) => ({ ...current, risks: [...current.risks, emptyProjectRisk(current.risks.length)] }))}><Plus size={14} />Add risk</button>
+                  <div><h3 id="project-risk-editor-title">{t('Risk treatments and failure modes')}</h3><p>{t('Probability and impact use a 1 to 5 scale. Scores and monetary exposure are recalculated by the server.')}</p></div>
+                  <button type="button" className="secondary-button" onClick={() => setRiskDraft((current) => ({ ...current, risks: [...current.risks, emptyProjectRisk(current.risks.length)] }))}><Plus size={14} />{t('Add risk')}</button>
                 </div>
                 <div className="project-risk-list">
                   {riskDraft.risks.map((risk, index) => {
@@ -2023,52 +2036,52 @@ function CommercialControl({
                     const residualScore = projectRiskScore(risk, true)
                     return (
                       <fieldset className="project-risk-row" key={`${risk.riskKey}-${index}`} data-testid={`project-risk-row-${index}`}>
-                        <legend>Risk {index + 1}</legend>
-                        <div className="project-risk-score" aria-label={`Risk ${index + 1} scores`}>
-                          <span className={`risk-band risk-band-${projectRiskBand(inherentScore)}`}>Inherent {inherentScore}</span>
+                        <legend>{t('Risk {number}', { number: index + 1 })}</legend>
+                        <div className="project-risk-score" aria-label={t('Risk {number} scores', { number: index + 1 })}>
+                          <span className={`risk-band risk-band-${projectRiskBand(inherentScore)}`}>{t('Inherent {score}', { score: inherentScore })}</span>
                           <ChevronRight size={15} />
-                          <span className={`risk-band risk-band-${projectRiskBand(residualScore)}`}>Residual {residualScore}</span>
+                          <span className={`risk-band risk-band-${projectRiskBand(residualScore)}`}>{t('Residual {score}', { score: residualScore })}</span>
                         </div>
-                        <label>Key<input required maxLength="40" value={risk.riskKey} onChange={(event) => updateProjectRisk(index, { riskKey: event.target.value.toUpperCase() })} /></label>
-                        <label>Category<select value={risk.category} onChange={(event) => updateProjectRisk(index, { category: event.target.value })}><option value="commercial">Commercial</option><option value="contract">Contract</option><option value="design">Design</option><option value="site_condition">Site condition</option><option value="schedule">Schedule</option><option value="resource">Resource</option><option value="supply_chain">Supply chain</option><option value="financial">Financial</option><option value="safety">Safety</option><option value="quality">Quality</option><option value="environment">Environment</option><option value="regulatory">Regulatory</option><option value="client">Client</option><option value="third_party">Third party</option><option value="other">Other</option></select></label>
-                        <label className="project-risk-title-field">Title<input required minLength="3" maxLength="160" value={risk.title} onChange={(event) => updateProjectRisk(index, { title: event.target.value })} /></label>
-                        <label>Owner<input required minLength="2" maxLength="160" value={risk.owner} onChange={(event) => updateProjectRisk(index, { owner: event.target.value })} /></label>
-                        <label>Probability<select value={risk.probability} onChange={(event) => updateProjectRisk(index, { probability: event.target.value })}>{[1, 2, 3, 4, 5].map((value) => <option value={value} key={value}>{value}</option>)}</select></label>
-                        <label>Impact<select value={risk.impact} onChange={(event) => updateProjectRisk(index, { impact: event.target.value })}>{[1, 2, 3, 4, 5].map((value) => <option value={value} key={value}>{value}</option>)}</select></label>
-                        <label className="project-risk-wide">Cause<textarea required minLength="8" maxLength="1000" rows={2} value={risk.cause} onChange={(event) => updateProjectRisk(index, { cause: event.target.value })} /></label>
-                        <label className="project-risk-wide">Risk event<textarea required minLength="8" maxLength="1000" rows={2} value={risk.event} onChange={(event) => updateProjectRisk(index, { event: event.target.value })} /></label>
-                        <label className="project-risk-wide">Consequence<textarea required minLength="8" maxLength="1000" rows={2} value={risk.consequence} onChange={(event) => updateProjectRisk(index, { consequence: event.target.value })} /></label>
-                        <label>Response<select value={risk.responseStrategy} onChange={(event) => updateProjectRisk(index, { responseStrategy: event.target.value })}><option value="avoid">Avoid</option><option value="mitigate">Mitigate</option><option value="transfer">Transfer</option><option value="accept">Accept</option></select></label>
-                        <label>Status<select value={risk.status} onChange={(event) => updateProjectRisk(index, { status: event.target.value })}><option value="open">Open</option><option value="monitoring">Monitoring</option><option value="treatment_due">Treatment due</option><option value="accepted">Accepted</option><option value="closed">Closed</option></select></label>
-                        <label>Treatment due<input type="date" value={risk.dueAt} onChange={(event) => updateProjectRisk(index, { dueAt: event.target.value })} /></label>
-                        <label className="project-risk-wide">Mitigation action<textarea required minLength="8" maxLength="2000" rows={2} value={risk.mitigationAction} onChange={(event) => updateProjectRisk(index, { mitigationAction: event.target.value })} /></label>
-                        <label className="project-risk-wide">Contingency action<textarea required minLength="8" maxLength="2000" rows={2} value={risk.contingencyAction} onChange={(event) => updateProjectRisk(index, { contingencyAction: event.target.value })} /></label>
-                        <label className="project-risk-wide">Trigger or early warning<textarea required minLength="8" maxLength="1000" rows={2} value={risk.trigger} onChange={(event) => updateProjectRisk(index, { trigger: event.target.value })} /></label>
-                        <label>Residual probability<select value={risk.residualProbability} onChange={(event) => updateProjectRisk(index, { residualProbability: event.target.value })}>{[1, 2, 3, 4, 5].map((value) => <option value={value} key={value}>{value}</option>)}</select></label>
-                        <label>Residual impact<select value={risk.residualImpact} onChange={(event) => updateProjectRisk(index, { residualImpact: event.target.value })}>{[1, 2, 3, 4, 5].map((value) => <option value={value} key={value}>{value}</option>)}</select></label>
-                        <label>Cost exposure<input type="number" min="0" max="1000000000" step="0.01" value={risk.costExposureAmount} onChange={(event) => updateProjectRisk(index, { costExposureAmount: event.target.value })} /></label>
-                        <label>Schedule days<input type="number" min="0" max="10000" step="0.25" value={risk.scheduleExposureDays} onChange={(event) => updateProjectRisk(index, { scheduleExposureDays: event.target.value })} /></label>
-                        {residualScore >= 15 || risk.responseStrategy === 'accept' || risk.status === 'accepted' ? <label className="project-risk-wide risk-acceptance">Acceptance or escalation reason<textarea required minLength="8" maxLength="1000" rows={2} value={risk.acceptanceReason} onChange={(event) => updateProjectRisk(index, { acceptanceReason: event.target.value })} /></label> : null}
-                        <label className="project-risk-wide">Evidence reference<input maxLength="500" value={risk.evidenceReference} onChange={(event) => updateProjectRisk(index, { evidenceReference: event.target.value })} /></label>
-                        <div className="premortem-link-heading"><TriangleAlert size={15} /><strong>Linked premortem failure mode</strong></div>
-                        <label className="project-risk-wide">Failure mode<textarea required minLength="8" maxLength="1000" rows={2} value={risk.failureMode} onChange={(event) => updateProjectRisk(index, { failureMode: event.target.value })} /></label>
-                        <label className="project-risk-wide">Early warning<textarea required minLength="8" maxLength="1000" rows={2} value={risk.earlyWarning} onChange={(event) => updateProjectRisk(index, { earlyWarning: event.target.value })} /></label>
-                        <label className="project-risk-wide">Prevention<textarea required minLength="8" maxLength="2000" rows={2} value={risk.prevention} onChange={(event) => updateProjectRisk(index, { prevention: event.target.value })} /></label>
-                        <button type="button" className="icon-button project-risk-remove" aria-label={`Remove risk ${index + 1}`} disabled={riskDraft.risks.length === 1} onClick={() => setRiskDraft((current) => ({ ...current, risks: current.risks.filter((_, riskIndex) => riskIndex !== index) }))}><X size={15} /></button>
+                        <label>{t('Key')}<input required maxLength="40" value={risk.riskKey} onChange={(event) => updateProjectRisk(index, { riskKey: event.target.value.toUpperCase() })} /></label>
+                        <label>{t('Category')}<select value={risk.category} onChange={(event) => updateProjectRisk(index, { category: event.target.value })}><option value="commercial">{t('Commercial')}</option><option value="contract">{t('Contract')}</option><option value="design">{t('Design')}</option><option value="site_condition">{t('Site condition')}</option><option value="schedule">{t('Schedule')}</option><option value="resource">{t('Resource')}</option><option value="supply_chain">{t('Supply chain')}</option><option value="financial">{t('Financial')}</option><option value="safety">{t('Safety')}</option><option value="quality">{t('Quality')}</option><option value="environment">{t('Environment')}</option><option value="regulatory">{t('Regulatory')}</option><option value="client">{t('Client')}</option><option value="third_party">{t('Third party')}</option><option value="other">{t('Other')}</option></select></label>
+                        <label className="project-risk-title-field">{t('Title')}<input required minLength="3" maxLength="160" value={risk.title} onChange={(event) => updateProjectRisk(index, { title: event.target.value })} /></label>
+                        <label>{t('Owner')}<input required minLength="2" maxLength="160" value={risk.owner} onChange={(event) => updateProjectRisk(index, { owner: event.target.value })} /></label>
+                        <label>{t('Probability')}<select value={risk.probability} onChange={(event) => updateProjectRisk(index, { probability: event.target.value })}>{[1, 2, 3, 4, 5].map((value) => <option value={value} key={value}>{value}</option>)}</select></label>
+                        <label>{t('Impact')}<select value={risk.impact} onChange={(event) => updateProjectRisk(index, { impact: event.target.value })}>{[1, 2, 3, 4, 5].map((value) => <option value={value} key={value}>{value}</option>)}</select></label>
+                        <label className="project-risk-wide">{t('Cause')}<textarea required minLength="8" maxLength="1000" rows={2} value={risk.cause} onChange={(event) => updateProjectRisk(index, { cause: event.target.value })} /></label>
+                        <label className="project-risk-wide">{t('Risk event')}<textarea required minLength="8" maxLength="1000" rows={2} value={risk.event} onChange={(event) => updateProjectRisk(index, { event: event.target.value })} /></label>
+                        <label className="project-risk-wide">{t('Consequence')}<textarea required minLength="8" maxLength="1000" rows={2} value={risk.consequence} onChange={(event) => updateProjectRisk(index, { consequence: event.target.value })} /></label>
+                        <label>{t('Response')}<select value={risk.responseStrategy} onChange={(event) => updateProjectRisk(index, { responseStrategy: event.target.value })}><option value="avoid">{t('Avoid')}</option><option value="mitigate">{t('Mitigate')}</option><option value="transfer">{t('Transfer')}</option><option value="accept">{t('Accept')}</option></select></label>
+                        <label>{t('Status')}<select value={risk.status} onChange={(event) => updateProjectRisk(index, { status: event.target.value })}><option value="open">{t('Open')}</option><option value="monitoring">{t('Monitoring')}</option><option value="treatment_due">{t('Treatment due')}</option><option value="accepted">{t('Accepted')}</option><option value="closed">{t('Closed')}</option></select></label>
+                        <label>{t('Treatment due')}<input type="date" value={risk.dueAt} onChange={(event) => updateProjectRisk(index, { dueAt: event.target.value })} /></label>
+                        <label className="project-risk-wide">{t('Mitigation action')}<textarea required minLength="8" maxLength="2000" rows={2} value={risk.mitigationAction} onChange={(event) => updateProjectRisk(index, { mitigationAction: event.target.value })} /></label>
+                        <label className="project-risk-wide">{t('Contingency action')}<textarea required minLength="8" maxLength="2000" rows={2} value={risk.contingencyAction} onChange={(event) => updateProjectRisk(index, { contingencyAction: event.target.value })} /></label>
+                        <label className="project-risk-wide">{t('Trigger or early warning')}<textarea required minLength="8" maxLength="1000" rows={2} value={risk.trigger} onChange={(event) => updateProjectRisk(index, { trigger: event.target.value })} /></label>
+                        <label>{t('Residual probability')}<select value={risk.residualProbability} onChange={(event) => updateProjectRisk(index, { residualProbability: event.target.value })}>{[1, 2, 3, 4, 5].map((value) => <option value={value} key={value}>{value}</option>)}</select></label>
+                        <label>{t('Residual impact')}<select value={risk.residualImpact} onChange={(event) => updateProjectRisk(index, { residualImpact: event.target.value })}>{[1, 2, 3, 4, 5].map((value) => <option value={value} key={value}>{value}</option>)}</select></label>
+                        <label>{t('Cost exposure')}<input type="number" min="0" max="1000000000" step="0.01" value={risk.costExposureAmount} onChange={(event) => updateProjectRisk(index, { costExposureAmount: event.target.value })} /></label>
+                        <label>{t('Schedule days')}<input type="number" min="0" max="10000" step="0.25" value={risk.scheduleExposureDays} onChange={(event) => updateProjectRisk(index, { scheduleExposureDays: event.target.value })} /></label>
+                        {residualScore >= 15 || risk.responseStrategy === 'accept' || risk.status === 'accepted' ? <label className="project-risk-wide risk-acceptance">{t('Acceptance or escalation reason')}<textarea required minLength="8" maxLength="1000" rows={2} value={risk.acceptanceReason} onChange={(event) => updateProjectRisk(index, { acceptanceReason: event.target.value })} /></label> : null}
+                        <label className="project-risk-wide">{t('Evidence reference')}<input maxLength="500" value={risk.evidenceReference} onChange={(event) => updateProjectRisk(index, { evidenceReference: event.target.value })} /></label>
+                        <div className="premortem-link-heading"><TriangleAlert size={15} /><strong>{t('Linked premortem failure mode')}</strong></div>
+                        <label className="project-risk-wide">{t('Failure mode')}<textarea required minLength="8" maxLength="1000" rows={2} value={risk.failureMode} onChange={(event) => updateProjectRisk(index, { failureMode: event.target.value })} /></label>
+                        <label className="project-risk-wide">{t('Early warning')}<textarea required minLength="8" maxLength="1000" rows={2} value={risk.earlyWarning} onChange={(event) => updateProjectRisk(index, { earlyWarning: event.target.value })} /></label>
+                        <label className="project-risk-wide">{t('Prevention')}<textarea required minLength="8" maxLength="2000" rows={2} value={risk.prevention} onChange={(event) => updateProjectRisk(index, { prevention: event.target.value })} /></label>
+                        <button type="button" className="icon-button project-risk-remove" aria-label={t('Remove risk {number}', { number: index + 1 })} disabled={riskDraft.risks.length === 1} onClick={() => setRiskDraft((current) => ({ ...current, risks: current.risks.filter((_, riskIndex) => riskIndex !== index) }))}><X size={15} /></button>
                       </fieldset>
                     )
                   })}
                 </div>
               </section>
               {riskRegister.revisions?.length ? (
-                <details className="project-risk-history"><summary>Revision history ({riskRegister.revisions.length})</summary><div>{riskRegister.revisions.map((revision) => <span key={revision.id}>v{revision.versionNumber} / {formatStatus(revision.status)} / {revision.riskCount} risks / {formatDateTime(revision.updatedAt)}</span>)}</div></details>
+                <details className="project-risk-history"><summary>{t('Revision history ({count})', { count: riskRegister.revisions.length })}</summary><div>{riskRegister.revisions.map((revision) => <span key={revision.id}>v{revision.versionNumber} / {t(formatStatus(revision.status))} / {t('{count} risks', { count: revision.riskCount })} / {formatDateTime(revision.updatedAt)}</span>)}</div></details>
               ) : null}
-              <label className="pricing-basis-textarea">Revision reason<textarea required minLength="8" maxLength="500" value={riskDraft.reason} onChange={(event) => setRiskDraft({ ...riskDraft, reason: event.target.value })} placeholder="Explain why this project risk review is being requested." /></label>
-              <p className="workflow-note">Approval makes this the exact risk source for pricing and quotes. Automation may flag the missing review, but it cannot author risks, accept liability, promise dates, commit spend, issue a quote, send a message, invoice, or move funds.</p>
+              <label className="pricing-basis-textarea">{t('Revision reason')}<textarea required minLength="8" maxLength="500" value={riskDraft.reason} onChange={(event) => setRiskDraft({ ...riskDraft, reason: event.target.value })} placeholder={t('Explain why this project risk review is being requested.')} /></label>
+              <p className="workflow-note">{t('Approval makes this the exact risk source for pricing and quotes. Automation may flag the missing review, but it cannot author risks, accept liability, promise dates, commit spend, issue a quote, send a message, invoice, or move funds.')}</p>
             </div>
             <div className="modal-actions">
-              <button type="button" className="secondary-button" onClick={() => setEditingRiskRegister(false)}>Cancel</button>
-              <button className="primary-button" disabled={submitting || !riskDraftReady}><ShieldCheck size={15} />{submitting ? 'Requesting...' : 'Request approval'}</button>
+              <button type="button" className="secondary-button" onClick={() => setEditingRiskRegister(false)}>{t('Cancel')}</button>
+              <button className="primary-button" disabled={submitting || !riskDraftReady}><ShieldCheck size={15} />{submitting ? t('Requesting...') : t('Request approval')}</button>
             </div>
           </form>
         </div>
@@ -2078,54 +2091,54 @@ function CommercialControl({
           <form className="modal pricing-basis-modal" role="dialog" aria-modal="true" aria-labelledby="pricing-basis-title" data-testid="pricing-basis-form" onSubmit={submitPricingBasis}>
             <div className="modal-heading">
               <div>
-                <p className="eyebrow">Source-bound commercial decision</p>
-                <h2 id="pricing-basis-title">Fixed price or time and materials</h2>
-                <p>{job.title} / decision history remains retained</p>
+                <p className="eyebrow">{t('Source-bound commercial decision')}</p>
+                <h2 id="pricing-basis-title">{t('Fixed price or time and materials')}</h2>
+                <p>{job.title} / {t('decision history remains retained')}</p>
               </div>
-              <button type="button" className="icon-button" aria-label="Close pricing-basis assessment" onClick={() => setEditingPricingBasis(false)}><X size={17} /></button>
+              <button type="button" className="icon-button" aria-label={t('Close pricing-basis assessment')} onClick={() => setEditingPricingBasis(false)}><X size={17} /></button>
             </div>
             <div className="pricing-basis-modal-body">
-              <div className="pricing-basis-preview" aria-label="Pricing-basis recommendation">
-                <div><span>Recommendation</span><strong>{pricingModelLabel(pricingPreview.recommendation)}</strong></div>
-                <div><span>Fixed-price readiness</span><strong>{pricingPreview.score}%</strong></div>
-                <div><span>Critical blockers</span><strong>{pricingPreview.blockers.length}</strong></div>
-                <div><span>Evidence gaps</span><strong>{pricingPreview.evidenceGaps.length}</strong></div>
+              <div className="pricing-basis-preview" aria-label={t('Pricing-basis recommendation')}>
+                <div><span>{t('Recommendation')}</span><strong>{t(pricingModelLabel(pricingPreview.recommendation))}</strong></div>
+                <div><span>{t('Fixed-price readiness')}</span><strong>{pricingPreview.score}%</strong></div>
+                <div><span>{t('Critical blockers')}</span><strong>{pricingPreview.blockers.length}</strong></div>
+                <div><span>{t('Evidence gaps')}</span><strong>{pricingPreview.evidenceGaps.length}</strong></div>
               </div>
               <div className="pricing-factor-list">
                 {pricingDraft.factors.map((factor, index) => (
                   <div className="pricing-factor-row" key={factor.key} data-testid={`pricing-factor-${factor.key}`}>
-                    <div><strong>{factor.label}</strong><small>{factor.weight}% weight{factor.critical ? ' / critical' : ''}</small></div>
+                    <div><strong>{t(factor.label)}</strong><small>{t('{weight}% weight{critical}', { weight: factor.weight, critical: factor.critical ? ` / ${t('critical')}` : '' })}</small></div>
                     <label>
-                      Assessment
+                      {t('Assessment')}
                       <select value={factor.status} onChange={(event) => updatePricingFactor(index, { status: event.target.value })}>
-                        <option value="yes">Yes</option>
-                        <option value="no">No</option>
-                        <option value="unknown">Unknown</option>
+                        <option value="yes">{t('Yes')}</option>
+                        <option value="no">{t('No')}</option>
+                        <option value="unknown">{t('Unknown')}</option>
                       </select>
                     </label>
                     <label>
-                      Retained evidence
-                      <input required minLength="8" maxLength="500" value={factor.evidence} onChange={(event) => updatePricingFactor(index, { evidence: event.target.value })} placeholder="Reference the scope, survey, drawing, takeoff, selection, schedule, or supplier evidence." />
+                      {t('Retained evidence')}
+                      <input required minLength="8" maxLength="500" value={factor.evidence} onChange={(event) => updatePricingFactor(index, { evidence: event.target.value })} placeholder={t('Reference the scope, survey, drawing, takeoff, selection, schedule, or supplier evidence.')} />
                     </label>
                   </div>
                 ))}
               </div>
               <fieldset className="pricing-model-fieldset">
-                <legend>Selected commercial model</legend>
+                <legend>{t('Selected commercial model')}</legend>
                 <div className="pricing-model-options">
-                  <label className={pricingDraft.selectedModel === 'fixed_price' ? 'selected' : ''}><input type="radio" name="pricing-model" value="fixed_price" checked={pricingDraft.selectedModel === 'fixed_price'} onChange={(event) => setPricingDraft({ ...pricingDraft, selectedModel: event.target.value })} /><span>Fixed price</span></label>
-                  <label className={pricingDraft.selectedModel === 'time_and_materials' ? 'selected' : ''}><input type="radio" name="pricing-model" value="time_and_materials" checked={pricingDraft.selectedModel === 'time_and_materials'} onChange={(event) => setPricingDraft({ ...pricingDraft, selectedModel: event.target.value })} /><span>Time and materials</span></label>
+                  <label className={pricingDraft.selectedModel === 'fixed_price' ? 'selected' : ''}><input type="radio" name="pricing-model" value="fixed_price" checked={pricingDraft.selectedModel === 'fixed_price'} onChange={(event) => setPricingDraft({ ...pricingDraft, selectedModel: event.target.value })} /><span>{t('Fixed price')}</span></label>
+                  <label className={pricingDraft.selectedModel === 'time_and_materials' ? 'selected' : ''}><input type="radio" name="pricing-model" value="time_and_materials" checked={pricingDraft.selectedModel === 'time_and_materials'} onChange={(event) => setPricingDraft({ ...pricingDraft, selectedModel: event.target.value })} /><span>{t('Time and materials')}</span></label>
                 </div>
               </fieldset>
-              <label className="pricing-basis-textarea">Decision rationale<textarea required minLength="8" maxLength="1000" value={pricingDraft.rationale} onChange={(event) => setPricingDraft({ ...pricingDraft, rationale: event.target.value })} placeholder="State why this model fits the retained risk and estimate basis." /></label>
+              <label className="pricing-basis-textarea">{t('Decision rationale')}<textarea required minLength="8" maxLength="1000" value={pricingDraft.rationale} onChange={(event) => setPricingDraft({ ...pricingDraft, rationale: event.target.value })} placeholder={t('State why this model fits the retained risk and estimate basis.')} /></label>
               {pricingOverride ? (
-                <label className="pricing-basis-textarea pricing-override-reason">Override reason<textarea required minLength="12" maxLength="500" value={pricingDraft.overrideReason} onChange={(event) => setPricingDraft({ ...pricingDraft, overrideReason: event.target.value })} placeholder="Explain the commercial control that justifies departing from the recommendation or proceeding with evidence gaps." /></label>
+                <label className="pricing-basis-textarea pricing-override-reason">{t('Override reason')}<textarea required minLength="12" maxLength="500" value={pricingDraft.overrideReason} onChange={(event) => setPricingDraft({ ...pricingDraft, overrideReason: event.target.value })} placeholder={t('Explain the commercial control that justifies departing from the recommendation or proceeding with evidence gaps.')} /></label>
               ) : null}
-              <p className="workflow-note">This retains an internal commercial decision. Quote issue, client acceptance, schedule commitments, supplier spend, invoices, and payments remain separately gated.</p>
+              <p className="workflow-note">{t('This retains an internal commercial decision. Quote issue, client acceptance, schedule commitments, supplier spend, invoices, and payments remain separately gated.')}</p>
             </div>
             <div className="modal-actions">
-              <button type="button" className="secondary-button" onClick={() => setEditingPricingBasis(false)}>Cancel</button>
-              <button className="primary-button" disabled={submitting || !pricingDraftReady}><ShieldCheck size={15} />{submitting ? 'Retaining...' : 'Retain pricing basis'}</button>
+              <button type="button" className="secondary-button" onClick={() => setEditingPricingBasis(false)}>{t('Cancel')}</button>
+              <button className="primary-button" disabled={submitting || !pricingDraftReady}><ShieldCheck size={15} />{submitting ? t('Retaining...') : t('Retain pricing basis')}</button>
             </div>
           </form>
         </div>
@@ -2133,7 +2146,7 @@ function CommercialControl({
       <div className="commercial-ledger">
         <section aria-labelledby="quote-ledger-title">
           <div className="commercial-list-heading">
-            <h4 id="quote-ledger-title">Estimates and quotes</h4>
+            <h4 id="quote-ledger-title">{t('Estimates and quotes')}</h4>
             <span>{quotes.length}</span>
           </div>
           {quotes.length ? (
@@ -2164,26 +2177,25 @@ function CommercialControl({
                   <div className="activity-row commercial-row" key={quote.id} data-testid={`commercial-quote-${quote.id}`}>
                     <div className="commercial-record">
                       <div>
-                        <strong>{currency.format(quote.subtotal || 0)} {quote.pricingModel === 'time_and_materials' ? 'budget net' : 'net'}</strong>
-                        <span className={`status status-${quote.status}`}>{formatStatus(quote.status)}</span>
-                        {quote.pricingModel ? <span className="tag">{pricingModelLabel(quote.pricingModel)}</span> : null}
-                        {quote.commercialScope ? <span className="tag">Scope v{quote.commercialScope.versionNumber}</span> : null}
-                        {quote.commercialScopeIntegrityValid === false ? <span className="tag tag-red">Scope integrity failed</span> : null}
-                        {issueApproval && quote.commercialScopeCurrent === false ? <span className="tag tag-amber">Scope revision required</span> : null}
-                        {quote.riskRegister ? <span className="tag">Risk v{quote.riskRegister.versionNumber}</span> : null}
-                        {quote.riskRegisterIntegrityValid === false ? <span className="tag tag-red">Risk integrity failed</span> : null}
-                        {issueApproval && quote.riskRegisterCurrent === false ? <span className="tag tag-amber">Risk review required</span> : null}
-                        {quote.pricingBasisIntegrityValid === false ? <span className="tag tag-red">Basis integrity failed</span> : null}
-                        {issueApproval && quote.pricingBasisCurrent === false ? <span className="tag tag-amber">Reassessment required</span> : null}
+                        <strong>{currency.format(quote.subtotal || 0)} {quote.pricingModel === 'time_and_materials' ? t('budget net') : t('net')}</strong>
+                        <span className={`status status-${quote.status}`}>{t(formatStatus(quote.status))}</span>
+                        {quote.pricingModel ? <span className="tag">{t(pricingModelLabel(quote.pricingModel))}</span> : null}
+                        {quote.commercialScope ? <span className="tag">{t('Scope v{version}', { version: quote.commercialScope.versionNumber })}</span> : null}
+                        {quote.commercialScopeIntegrityValid === false ? <span className="tag tag-red">{t('Scope integrity failed')}</span> : null}
+                        {issueApproval && quote.commercialScopeCurrent === false ? <span className="tag tag-amber">{t('Scope revision required')}</span> : null}
+                        {quote.riskRegister ? <span className="tag">{t('Risk v{version}', { version: quote.riskRegister.versionNumber })}</span> : null}
+                        {quote.riskRegisterIntegrityValid === false ? <span className="tag tag-red">{t('Risk integrity failed')}</span> : null}
+                        {issueApproval && quote.riskRegisterCurrent === false ? <span className="tag tag-amber">{t('Risk review required')}</span> : null}
+                        {quote.pricingBasisIntegrityValid === false ? <span className="tag tag-red">{t('Basis integrity failed')}</span> : null}
+                        {issueApproval && quote.pricingBasisCurrent === false ? <span className="tag tag-amber">{t('Reassessment required')}</span> : null}
                       </div>
                       <small>
-                        {quote.lineItems?.length || 0} line item{quote.lineItems?.length === 1 ? '' : 's'} · VAT {quote.taxRate || 0}% ·
-                        gross {currency.format(quote.total || 0)}
+                        {t('{count} line item(s) / VAT {vat}% / gross {gross}', { count: quote.lineItems?.length || 0, vat: quote.taxRate || 0, gross: currency.format(quote.total || 0) })}
                       </small>
                       <small>
-                        Valid until {formatDate(quote.validUntil)}
-                        {issuePackage ? ` · package ${issuePackage.data?.issueReference || 'retained'}` : ''}
-                        {quote.data?.acceptance?.evidenceReference ? ` · evidence ${quote.data.acceptance.evidenceReference}` : ''}
+                        {t('Valid until {date}', { date: formatDate(quote.validUntil) })}
+                        {issuePackage ? ` · ${t('package {reference}', { reference: issuePackage.data?.issueReference || t('retained') })}` : ''}
+                        {quote.data?.acceptance?.evidenceReference ? ` · ${t('evidence {reference}', { reference: quote.data.acceptance.evidenceReference })}` : ''}
                       </small>
                     </div>
                     <div className="commercial-row-actions">
@@ -2192,11 +2204,11 @@ function CommercialControl({
                           type="button"
                           className="secondary-button"
                           disabled={submitting || quote.commercialScopeIntegrityValid !== true || quote.commercialScopeCurrent !== true || quote.pricingBasisIntegrityValid === false || quote.pricingBasisCurrent === false}
-                          title={quote.commercialScopeCurrent === false ? 'Approve a current commercial scope revision before approving this quote' : quote.pricingBasisCurrent === false ? 'Reassess the pricing basis before approving this quote' : 'Review quote approval'}
+                          title={quote.commercialScopeCurrent === false ? t('Approve a current commercial scope revision before approving this quote') : quote.pricingBasisCurrent === false ? t('Reassess the pricing basis before approving this quote') : t('Review quote approval')}
                           onClick={() => onOpenApprovals({ approvalId: issueApproval.id })}
                         >
                           <ShieldCheck size={15} />
-                          Review quote
+                          {t('Review quote')}
                         </button>
                       ) : null}
                       {canPrepare ? (
@@ -2205,11 +2217,11 @@ function CommercialControl({
                           className="secondary-button"
                           data-testid={`prepare-quote-package-${quote.id}`}
                           disabled={submitting}
-                          title="Prepare an immutable quote package and approval-gated delivery draft"
+                          title={t('Prepare an immutable quote package and approval-gated delivery draft')}
                           onClick={() => onRequestAcceptance('issue_package', quote)}
                         >
                           <FileDown size={15} />
-                          Prepare issue package
+                          {t('Prepare issue package')}
                         </button>
                       ) : null}
                       {issuePackage ? (
@@ -2220,7 +2232,7 @@ function CommercialControl({
                           download
                         >
                           <FileDown size={15} />
-                          Download package
+                          {t('Download package')}
                         </a>
                       ) : null}
                       {deliveryApproval && canApprove ? (
@@ -2231,7 +2243,7 @@ function CommercialControl({
                           onClick={() => onOpenApprovals({ approvalId: deliveryApproval.id })}
                         >
                           <ShieldCheck size={15} />
-                          Review delivery
+                          {t('Review delivery')}
                         </button>
                       ) : null}
                       {acceptanceApproval && canApprove ? (
@@ -2242,7 +2254,7 @@ function CommercialControl({
                           onClick={() => onOpenApprovals({ approvalId: acceptanceApproval.id })}
                         >
                           <ShieldCheck size={15} />
-                          Verify acceptance
+                          {t('Verify acceptance')}
                         </button>
                       ) : null}
                       {quote.status === 'approved' && canCoordinate && !acceptanceApproval ? (
@@ -2253,7 +2265,7 @@ function CommercialControl({
                           onClick={() => onRequestAcceptance('quote', quote)}
                         >
                           <Check size={15} />
-                          Record acceptance
+                          {t('Record acceptance')}
                         </button>
                       ) : null}
                     </div>
@@ -2262,12 +2274,12 @@ function CommercialControl({
               })}
             </div>
           ) : (
-            <p className="workflow-note">No retained estimate exists for this job.</p>
+            <p className="workflow-note">{t('No retained estimate exists for this job.')}</p>
           )}
         </section>
         <section aria-labelledby="change-ledger-title">
           <div className="commercial-list-heading">
-            <h4 id="change-ledger-title">Scope changes</h4>
+            <h4 id="change-ledger-title">{t('Scope changes')}</h4>
             <span>{changeOrders.length}</span>
           </div>
           {changeOrders.length ? (
@@ -2299,24 +2311,24 @@ function CommercialControl({
                     <div className="commercial-record">
                       <div>
                         <strong>{changeOrder.variationNumber ? `${changeOrder.variationNumber} / R${changeOrder.revisionNumber} - ` : ''}{changeOrder.title}</strong>
-                        <span className={`status status-${changeOrder.status}`}>{formatStatus(changeOrder.status)}</span>
+                        <span className={`status status-${changeOrder.status}`}>{t(formatStatus(changeOrder.status))}</span>
                       </div>
                       <small>
-                        {currency.format(changeOrder.amount || 0)} net · {changeOrder.scheduleDeltaDays || 0} day schedule impact ·{' '}
+                        {t('{amount} net / {days} day schedule impact', { amount: currency.format(changeOrder.amount || 0), days: changeOrder.scheduleDeltaDays || 0 })} ·{' '}
                         {commercialCurrency}
                       </small>
                       <small>
-                        {changeOrder.scopeDelta || 'Scope evidence not retained'}
-                        {issuePackage ? ` · package ${issuePackage.data?.issueReference || 'retained'}` : ''}
+                        {changeOrder.scopeDelta || t('Scope evidence not retained')}
+                        {issuePackage ? ` · ${t('package {reference}', { reference: issuePackage.data?.issueReference || t('retained') })}` : ''}
                         {changeOrder.data?.issuePackage?.transportStatus
-                          ? ` · ${formatStatus(changeOrder.data.issuePackage.transportStatus)}`
+                          ? ` · ${t(formatStatus(changeOrder.data.issuePackage.transportStatus))}`
                           : ''}
                         {changeOrder.data?.acceptance?.evidenceReference
-                          ? ` · evidence ${changeOrder.data.acceptance.evidenceReference}`
+                          ? ` · ${t('evidence {reference}', { reference: changeOrder.data.acceptance.evidenceReference })}`
                           : ''}
                       </small>
                       <small>
-                        {formatStatus(changeOrder.formalControl?.variationType || 'legacy record')} · initiated by {formatStatus(changeOrder.formalControl?.initiatedBy || 'not retained')} · risk {formatStatus(changeOrder.formalControl?.riskImpact || 'not retained')} · {changeOrder.integrityValid ? 'snapshot verified' : 'snapshot invalid'} · {changeOrder.sourceCurrent ? 'contract source current' : 'contract source stale'} · {changeOrder.workAuthorized ? 'work authorized' : 'work not authorized'}
+                        {t(formatStatus(changeOrder.formalControl?.variationType || 'legacy record'))} · {t('initiated by {initiator}', { initiator: t(formatStatus(changeOrder.formalControl?.initiatedBy || 'not retained')) })} · {t('risk {risk}', { risk: t(formatStatus(changeOrder.formalControl?.riskImpact || 'not retained')) })} · {changeOrder.integrityValid ? t('snapshot verified') : t('snapshot invalid')} · {changeOrder.sourceCurrent ? t('contract source current') : t('contract source stale')} · {changeOrder.workAuthorized ? t('work authorized') : t('work not authorized')}
                       </small>
                     </div>
                     <div className="commercial-row-actions">
@@ -2328,7 +2340,7 @@ function CommercialControl({
                           onClick={() => onOpenApprovals({ approvalId: approval.id })}
                         >
                           <ShieldCheck size={15} />
-                          Review change
+                          {t('Review change')}
                         </button>
                       ) : null}
                       {canPrepare ? (
@@ -2337,11 +2349,11 @@ function CommercialControl({
                           className="secondary-button"
                           data-testid={`prepare-change-package-${changeOrder.id}`}
                           disabled={submitting}
-                          title="Prepare an immutable change-order package and approval-gated delivery draft"
+                          title={t('Prepare an immutable change-order package and approval-gated delivery draft')}
                           onClick={() => onRequestAcceptance('change_issue_package', changeOrder)}
                         >
                           <FileDown size={15} />
-                          Prepare issue package
+                          {t('Prepare issue package')}
                         </button>
                       ) : null}
                       {issuePackage ? (
@@ -2352,7 +2364,7 @@ function CommercialControl({
                           download
                         >
                           <FileDown size={15} />
-                          Download package
+                          {t('Download package')}
                         </a>
                       ) : null}
                       {deliveryApproval && canApprove ? (
@@ -2363,7 +2375,7 @@ function CommercialControl({
                           onClick={() => onOpenApprovals({ approvalId: deliveryApproval.id })}
                         >
                           <ShieldCheck size={15} />
-                          Review delivery
+                          {t('Review delivery')}
                         </button>
                       ) : null}
                       {canRecordDelivery ? (
@@ -2374,7 +2386,7 @@ function CommercialControl({
                           onClick={() => onRecordChangeDelivery(changeOrder, deliveryDraft)}
                         >
                           <MailCheck size={15} />
-                          Record delivery receipt
+                          {t('Record delivery receipt')}
                         </button>
                       ) : null}
                       {acceptanceApproval && canApprove ? (
@@ -2385,7 +2397,7 @@ function CommercialControl({
                           onClick={() => onOpenApprovals({ approvalId: acceptanceApproval.id })}
                         >
                           <ShieldCheck size={15} />
-                          Verify acceptance
+                          {t('Verify acceptance')}
                         </button>
                       ) : null}
                       {clientResponseApproval && canApprove ? (
@@ -2396,7 +2408,7 @@ function CommercialControl({
                           onClick={() => onOpenApprovals({ approvalId: clientResponseApproval.id })}
                         >
                           <ShieldCheck size={15} />
-                          Review client response
+                          {t('Review client response')}
                         </button>
                       ) : null}
                       {changeOrder.status === 'issued' && canCoordinate && !acceptanceApproval && !clientResponseApproval ? (
@@ -2407,7 +2419,7 @@ function CommercialControl({
                           onClick={() => onRequestAcceptance('change_order', changeOrder)}
                         >
                           <Check size={15} />
-                          Record acceptance
+                          {t('Record acceptance')}
                         </button>
                       ) : null}
                       {canRevise ? (
@@ -2418,7 +2430,7 @@ function CommercialControl({
                           onClick={() => onNewChangeOrder(changeOrder)}
                         >
                           <FileDown size={15} />
-                          Prepare revision
+                          {t('Prepare revision')}
                         </button>
                       ) : null}
                     </div>
@@ -2427,7 +2439,7 @@ function CommercialControl({
               })}
             </div>
           ) : (
-            <p className="workflow-note">No retained scope change exists for this job.</p>
+            <p className="workflow-note">{t('No retained scope change exists for this job.')}</p>
           )}
         </section>
       </div>

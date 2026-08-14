@@ -1,5 +1,13 @@
 # Codex Worklog
 
+- Localized the complete source-bound commercial workflow in Dutch and English:
+  written scope and allowances, project risk and premortem, fixed-price-versus-regie
+  selection, estimate and quote registers, acceptance evidence, verified delivery,
+  and numbered formal variations. The same retained English contract and risk
+  evidence remains unchanged when the interface switches to Dutch.
+- Expanded the lazy specialist operator catalog from 903 to 1,208 unique keys and
+  extended the governed commercial browser journey with Dutch form, decision, and
+  estimate assertions plus an explicit English round trip.
 - Localized the complete WBS/quantity-takeoff, labour-burden, overhead-recovery,
   estimating-rate policy, and unit-rate build-up surface in Dutch and English,
   including create, edit, remove, conversion, and policy dialogs. Operator-entered

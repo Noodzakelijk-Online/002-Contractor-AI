@@ -79,6 +79,9 @@ test('operator retains source-bound fixed-price and T&M decisions with governed 
   await approveCommercialScope(request, intake.job.id, `browser-pricing-scope-${key}-01`);
 
   await page.goto('/');
+  await expect(page.getByRole('heading', { name: /^(Today|Vandaag)$/ })).toBeVisible();
+  await expect(page.getByRole('button', { name: `Open ${title}` }).first()).toBeEnabled();
+  await page.getByLabel(/^(Language|Taal)$/).selectOption('en-GB');
   await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible();
   await page.getByRole('button', { name: `Open ${title}` }).first().click();
   const workspace = page.getByTestId('job-workspace');

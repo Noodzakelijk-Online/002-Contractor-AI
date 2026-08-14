@@ -15822,6 +15822,7 @@ function App() {
                   {!fieldScoped ? (
                     <CommercialControl
                       job={selectedJob}
+                      locale={operatorLocale}
                       canCoordinate={canCoordinate}
                       canApprove={capabilities.approvals === true}
                       submitting={submitting}
@@ -16609,15 +16610,15 @@ function App() {
           >
             <div className="modal-heading">
               <div>
-                <p className="eyebrow">Approval-gated commercial record</p>
+                <p className="eyebrow">{ot('Approval-gated commercial record')}</p>
                 <h2 id="commercial-draft-title">
                   {commercialDraftMode === 'quote'
-                    ? selectedJob?.pricingBasis?.currentDecision?.selectedModel === 'time_and_materials' ? 'New T&M budget estimate' : 'New fixed-price estimate'
-                    : 'New scope change'}
+                    ? selectedJob?.pricingBasis?.currentDecision?.selectedModel === 'time_and_materials' ? ot('New T&M budget estimate') : ot('New fixed-price estimate')
+                    : ot('New scope change')}
                 </h2>
-                <p>{selectedJob?.title} / server-derived totals</p>
+                <p>{selectedJob?.title} / {ot('server-derived totals')}</p>
               </div>
-              <button type="button" className="icon-button" aria-label="Close commercial draft" onClick={closeCommercialDialog}>
+              <button type="button" className="icon-button" aria-label={ot('Close commercial draft')} onClick={closeCommercialDialog}>
                 <X size={18} />
               </button>
             </div>
@@ -16628,26 +16629,26 @@ function App() {
                     <div className="commercial-draft-pricing" data-testid="commercial-draft-scope">
                       <ClipboardList size={16} />
                       <div>
-                        <strong>{selectedJob?.commercialScope?.currentRevision?.title || 'Commercial scope required'}</strong>
+                        <strong>{selectedJob?.commercialScope?.currentRevision?.title || ot('Commercial scope required')}</strong>
                         <span>
-                          Revision v{selectedJob?.commercialScope?.currentRevision?.versionNumber || '-'} / {selectedJob?.commercialScope?.currentRevision?.snapshot?.inclusions?.length || 0} inclusions / {selectedJob?.commercialScope?.currentRevision?.snapshot?.exclusions?.length || 0} exclusions / {selectedJob?.commercialScope?.currentRevision?.snapshot?.allowances?.length || 0} allowances / source current
+                          {ot('Revision v{version} / {inclusions} inclusions / {exclusions} exclusions / {allowances} allowances / source current', { version: selectedJob?.commercialScope?.currentRevision?.versionNumber || '-', inclusions: selectedJob?.commercialScope?.currentRevision?.snapshot?.inclusions?.length || 0, exclusions: selectedJob?.commercialScope?.currentRevision?.snapshot?.exclusions?.length || 0, allowances: selectedJob?.commercialScope?.currentRevision?.snapshot?.allowances?.length || 0 })}
                         </span>
                       </div>
                     </div>
                     <div className="commercial-draft-pricing" data-testid="commercial-draft-pricing-basis">
                       <GitBranch size={16} />
                       <div>
-                        <strong>{formatStatus(selectedJob?.pricingBasis?.currentDecision?.selectedModel || 'review')}</strong>
+                        <strong>{ot(formatStatus(selectedJob?.pricingBasis?.currentDecision?.selectedModel || 'review'))}</strong>
                         <span>
                           {selectedJob?.pricingBasis?.currentDecision?.selectedModel === 'time_and_materials'
-                            ? 'Amounts form a budget estimate; actual billing requires retained time, material, rate, and work evidence.'
-                            : 'The price applies to the stated scope, assumptions, exclusions, and allowances; approved changes remain separate.'}
+                            ? ot('Amounts form a budget estimate; actual billing requires retained time, material, rate, and work evidence.')
+                            : ot('The price applies to the stated scope, assumptions, exclusions, and allowances; approved changes remain separate.')}
                         </span>
                       </div>
                     </div>
                     <div className="form-grid compact-form">
                       <label>
-                        Valid until
+                        {ot('Valid until')}
                         <input
                           autoFocus
                           required
@@ -16658,7 +16659,7 @@ function App() {
                         />
                       </label>
                       <label>
-                        VAT rate (%)
+                        {ot('VAT rate (%)')}
                         <input
                           required
                           type="number"
@@ -16674,102 +16675,102 @@ function App() {
                 ) : (
                   <div className="form-grid compact-form">
                     <label className="form-span">
-                      Change title
+                      {ot('Change title')}
                       <input
                         autoFocus
                         required
                         minLength="2"
                         value={changeOrderDraft.title}
                         onChange={(event) => setChangeOrderDraft({ ...changeOrderDraft, title: event.target.value })}
-                        placeholder="Describe the commercial decision"
+                        placeholder={ot('Describe the commercial decision')}
                       />
                     </label>
                     <label className="form-span">
-                      Scope change
+                      {ot('Scope change')}
                       <textarea
                         required
                         minLength="3"
                         value={changeOrderDraft.scopeDelta}
                         onChange={(event) => setChangeOrderDraft({ ...changeOrderDraft, scopeDelta: event.target.value })}
-                        placeholder="Record added, omitted, or revised scope."
+                        placeholder={ot('Record added, omitted, or revised scope.')}
                       />
                     </label>
                     {changeOrderDraft.supersedesChangeOrderId ? (
                       <div className="form-span commercial-source-notice" role="status">
-                        <ShieldCheck size={16} />Preparing the next formal revision of the client-returned variation. The prior revision is superseded only after this revision is approved.
+                        <ShieldCheck size={16} />{ot('Preparing the next formal revision of the client-returned variation. The prior revision is superseded only after this revision is approved.')}
                       </div>
                     ) : null}
                     <label>
-                      Variation type
+                      {ot('Variation type')}
                       <select value={changeOrderDraft.variationType} onChange={(event) => setChangeOrderDraft({ ...changeOrderDraft, variationType: event.target.value })}>
-                        <option value="client_request">Client request</option>
-                        <option value="design_change">Design change</option>
-                        <option value="unforeseen_condition">Unforeseen condition</option>
-                        <option value="regulatory_change">Regulatory change</option>
-                        <option value="allowance_reconciliation">Allowance reconciliation</option>
-                        <option value="contractor_proposal">Contractor proposal</option>
-                        <option value="error_correction">Error correction</option>
-                        <option value="other">Other</option>
+                        <option value="client_request">{ot('Client request')}</option>
+                        <option value="design_change">{ot('Design change')}</option>
+                        <option value="unforeseen_condition">{ot('Unforeseen condition')}</option>
+                        <option value="regulatory_change">{ot('Regulatory change')}</option>
+                        <option value="allowance_reconciliation">{ot('Allowance reconciliation')}</option>
+                        <option value="contractor_proposal">{ot('Contractor proposal')}</option>
+                        <option value="error_correction">{ot('Error correction')}</option>
+                        <option value="other">{ot('Other')}</option>
                       </select>
                     </label>
                     <label>
-                      Initiated by
+                      {ot('Initiated by')}
                       <select value={changeOrderDraft.initiatedBy} onChange={(event) => setChangeOrderDraft({ ...changeOrderDraft, initiatedBy: event.target.value })}>
-                        <option value="client">Client</option>
-                        <option value="contractor">Contractor</option>
-                        <option value="designer">Designer</option>
-                        <option value="authority">Authority</option>
-                        <option value="supplier">Supplier</option>
-                        <option value="site_condition">Site condition</option>
-                        <option value="other">Other</option>
+                        <option value="client">{ot('Client')}</option>
+                        <option value="contractor">{ot('Contractor')}</option>
+                        <option value="designer">{ot('Designer')}</option>
+                        <option value="authority">{ot('Authority')}</option>
+                        <option value="supplier">{ot('Supplier')}</option>
+                        <option value="site_condition">{ot('Site condition')}</option>
+                        <option value="other">{ot('Other')}</option>
                       </select>
                     </label>
                     <label className="form-span">
-                      Cause
-                      <textarea required minLength="8" maxLength="2000" value={changeOrderDraft.cause} onChange={(event) => setChangeOrderDraft({ ...changeOrderDraft, cause: event.target.value })} placeholder="What event or instruction created this variation?" />
+                      {ot('Cause')}
+                      <textarea required minLength="8" maxLength="2000" value={changeOrderDraft.cause} onChange={(event) => setChangeOrderDraft({ ...changeOrderDraft, cause: event.target.value })} placeholder={ot('What event or instruction created this variation?')} />
                     </label>
                     <label className="form-span">
-                      Contractual justification
-                      <textarea required minLength="8" maxLength="2000" value={changeOrderDraft.justification} onChange={(event) => setChangeOrderDraft({ ...changeOrderDraft, justification: event.target.value })} placeholder="Why is this outside or different from the retained contract scope?" />
+                      {ot('Contractual justification')}
+                      <textarea required minLength="8" maxLength="2000" value={changeOrderDraft.justification} onChange={(event) => setChangeOrderDraft({ ...changeOrderDraft, justification: event.target.value })} placeholder={ot('Why is this outside or different from the retained contract scope?')} />
                     </label>
                     <label>
-                      Reference quote
+                      {ot('Reference quote')}
                       <select
                         value={changeOrderDraft.quoteId}
                         onChange={(event) => setChangeOrderDraft({ ...changeOrderDraft, quoteId: event.target.value })}
                       >
-                        <option value="">Current retained contract</option>
+                        <option value="">{ot('Current retained contract')}</option>
                         {(selectedJob?.quotes || [])
                           .filter((quote) => quote.status === 'accepted')
                           .map((quote) => (
                             <option key={quote.id} value={quote.id}>
-                              {formatStatus(quote.status)} / {currency.format(quote.subtotal || 0)} net
+                              {ot(formatStatus(quote.status))} / {currency.format(quote.subtotal || 0)} {ot('net')}
                             </option>
                           ))}
                       </select>
                     </label>
                     <label>
-                      Contract / clause reference
+                      {ot('Contract / clause reference')}
                       <input required minLength="3" maxLength="240" value={changeOrderDraft.contractReference} onChange={(event) => setChangeOrderDraft({ ...changeOrderDraft, contractReference: event.target.value })} />
                     </label>
                     <label>
-                      Notice reference
-                      <input maxLength="240" value={changeOrderDraft.noticeReference} onChange={(event) => setChangeOrderDraft({ ...changeOrderDraft, noticeReference: event.target.value })} placeholder="Instruction, RFI, email, or notice ID" />
+                      {ot('Notice reference')}
+                      <input maxLength="240" value={changeOrderDraft.noticeReference} onChange={(event) => setChangeOrderDraft({ ...changeOrderDraft, noticeReference: event.target.value })} placeholder={ot('Instruction, RFI, email, or notice ID')} />
                     </label>
                     <label>
-                      If no notice, explain why
+                      {ot('If no notice, explain why')}
                       <input required={!changeOrderDraft.noticeReference.trim()} minLength="8" maxLength="500" value={changeOrderDraft.noticeNotApplicableReason} onChange={(event) => setChangeOrderDraft({ ...changeOrderDraft, noticeNotApplicableReason: event.target.value })} />
                     </label>
                     <label>
-                      Requested on
+                      {ot('Requested on')}
                       <input required type="date" value={changeOrderDraft.requestedAt} onChange={(event) => setChangeOrderDraft({ ...changeOrderDraft, requestedAt: event.target.value })} />
                     </label>
                     <label>
-                      Response due
+                      {ot('Response due')}
                       <input type="date" min={changeOrderDraft.requestedAt} value={changeOrderDraft.responseDueAt} onChange={(event) => setChangeOrderDraft({ ...changeOrderDraft, responseDueAt: event.target.value })} />
                     </label>
                     <label>
-                      Schedule impact (days)
+                      {ot('Schedule impact (days)')}
                       <input
                         required
                         type="number"
@@ -16781,21 +16782,21 @@ function App() {
                       />
                     </label>
                     <label className="form-span">
-                      Schedule impact basis
-                      <textarea required minLength="8" maxLength="2000" value={changeOrderDraft.scheduleImpactNarrative} onChange={(event) => setChangeOrderDraft({ ...changeOrderDraft, scheduleImpactNarrative: event.target.value })} placeholder="Explain the proposed effect or why no date change is needed." />
+                      {ot('Schedule impact basis')}
+                      <textarea required minLength="8" maxLength="2000" value={changeOrderDraft.scheduleImpactNarrative} onChange={(event) => setChangeOrderDraft({ ...changeOrderDraft, scheduleImpactNarrative: event.target.value })} placeholder={ot('Explain the proposed effect or why no date change is needed.')} />
                     </label>
                     <label>
-                      Risk impact
-                      <select aria-label="Risk impact" value={changeOrderDraft.riskImpact} onChange={(event) => setChangeOrderDraft({ ...changeOrderDraft, riskImpact: event.target.value })}>
-                        <option value="none">None</option>
-                        <option value="low">Low</option>
-                        <option value="medium">Medium</option>
-                        <option value="high">High</option>
-                        <option value="critical">Critical</option>
+                      {ot('Risk impact')}
+                      <select aria-label={ot('Risk impact')} value={changeOrderDraft.riskImpact} onChange={(event) => setChangeOrderDraft({ ...changeOrderDraft, riskImpact: event.target.value })}>
+                        <option value="none">{ot('None')}</option>
+                        <option value="low">{ot('Low')}</option>
+                        <option value="medium">{ot('Medium')}</option>
+                        <option value="high">{ot('High')}</option>
+                        <option value="critical">{ot('Critical')}</option>
                       </select>
                     </label>
                     <label>
-                      VAT rate (%)
+                      {ot('VAT rate (%)')}
                       <input
                         required
                         type="number"
@@ -16807,27 +16808,27 @@ function App() {
                       />
                     </label>
                     <label className="form-span">
-                      Risk impact statement
+                      {ot('Risk impact statement')}
                       <textarea required minLength="8" maxLength="2000" value={changeOrderDraft.riskImpactStatement} onChange={(event) => setChangeOrderDraft({ ...changeOrderDraft, riskImpactStatement: event.target.value })} />
                     </label>
                     <label>
-                      Assumptions (one per line)
+                      {ot('Assumptions (one per line)')}
                       <textarea required value={changeOrderDraft.assumptions} onChange={(event) => setChangeOrderDraft({ ...changeOrderDraft, assumptions: event.target.value })} />
                     </label>
                     <label>
-                      Exclusions (one per line)
+                      {ot('Exclusions (one per line)')}
                       <textarea required value={changeOrderDraft.exclusions} onChange={(event) => setChangeOrderDraft({ ...changeOrderDraft, exclusions: event.target.value })} />
                     </label>
                     <label className="form-span">
-                      Evidence references (one per line)
-                      <textarea value={changeOrderDraft.evidenceReferences} onChange={(event) => setChangeOrderDraft({ ...changeOrderDraft, evidenceReferences: event.target.value })} placeholder="Drawing revision, instruction, site photo, RFI, or retained document reference" />
+                      {ot('Evidence references (one per line)')}
+                      <textarea value={changeOrderDraft.evidenceReferences} onChange={(event) => setChangeOrderDraft({ ...changeOrderDraft, evidenceReferences: event.target.value })} placeholder={ot('Drawing revision, instruction, site photo, RFI, or retained document reference')} />
                     </label>
                   </div>
                 )}
                 <div className="commercial-line-heading">
                   <div>
-                    <h3>Line items</h3>
-                    <p>Amounts are recalculated by the ledger.</p>
+                    <h3>{ot('Line items')}</h3>
+                    <p>{ot('Amounts are recalculated by the ledger.')}</p>
                   </div>
                   <button
                     type="button"
@@ -16836,14 +16837,14 @@ function App() {
                     onClick={() => addCommercialLineItem(commercialDraftMode)}
                   >
                     <Plus size={15} />
-                    Add line
+                    {ot('Add line')}
                   </button>
                 </div>
                 <div className="commercial-line-items">
                   {activeCommercialDraft.lineItems.map((item, index) => (
                     <div className="commercial-line-item" key={index}>
                       <label>
-                        Description
+                        {ot('Description')}
                         <input
                           required
                           minLength="2"
@@ -16853,7 +16854,7 @@ function App() {
                         />
                       </label>
                       <label>
-                        Quantity
+                        {ot('Quantity')}
                         <input
                           required
                           type="number"
@@ -16865,7 +16866,7 @@ function App() {
                         />
                       </label>
                       <label>
-                        Unit price
+                        {ot('Unit price')}
                         <input
                           required
                           type="number"
@@ -16877,7 +16878,7 @@ function App() {
                         />
                       </label>
                       <label>
-                        Cost code
+                        {ot('Cost code')}
                         <input
                           maxLength="80"
                           value={item.costCode}
@@ -16887,7 +16888,7 @@ function App() {
                       <button
                         type="button"
                         className="icon-button commercial-line-remove"
-                        aria-label={`Remove line ${index + 1}`}
+                        aria-label={ot('Remove line {number}', { number: index + 1 })}
                         disabled={activeCommercialDraft.lineItems.length === 1}
                         onClick={() => removeCommercialLineItem(commercialDraftMode, index)}
                       >
@@ -16896,19 +16897,19 @@ function App() {
                     </div>
                   ))}
                 </div>
-                <div className="commercial-total-strip" aria-label="Commercial totals">
+                <div className="commercial-total-strip" aria-label={ot('Commercial totals')}>
                   <span>
-                    {commercialDraftMode === 'quote' && selectedJob?.pricingBasis?.currentDecision?.selectedModel === 'time_and_materials' ? 'Budget net' : 'Net'} <strong>{currency.format(commercialDraftNet)}</strong>
+                    {commercialDraftMode === 'quote' && selectedJob?.pricingBasis?.currentDecision?.selectedModel === 'time_and_materials' ? ot('Budget net') : ot('Net')} <strong>{currency.format(commercialDraftNet)}</strong>
                   </span>
                   <span>
-                    VAT <strong>{currency.format(commercialDraftTax)}</strong>
+                    {ot('VAT')} <strong>{currency.format(commercialDraftTax)}</strong>
                   </span>
                   <span>
-                    {commercialDraftMode === 'quote' && selectedJob?.pricingBasis?.currentDecision?.selectedModel === 'time_and_materials' ? 'Budget gross' : 'Gross'} <strong>{currency.format(commercialDraftTotal)}</strong>
+                    {commercialDraftMode === 'quote' && selectedJob?.pricingBasis?.currentDecision?.selectedModel === 'time_and_materials' ? ot('Budget gross') : ot('Gross')} <strong>{currency.format(commercialDraftTotal)}</strong>
                   </span>
                 </div>
                 <label>
-                  Internal notes
+                  {ot('Internal notes')}
                   <textarea
                     maxLength="4000"
                     value={activeCommercialDraft.notes}
@@ -16917,25 +16918,24 @@ function App() {
                         ? setQuoteDraft({ ...quoteDraft, notes: event.target.value })
                         : setChangeOrderDraft({ ...changeOrderDraft, notes: event.target.value })
                     }
-                    placeholder="Record assumptions, exclusions, and reviewer context."
+                    placeholder={ot('Record assumptions, exclusions, and reviewer context.')}
                   />
                 </label>
                 <p className="workflow-note">
-                  Saving creates an internal approval request. It does not send a quote, commit scope, alter contract value, or contact the
-                  client.
+                  {ot('Saving creates an internal approval request. It does not send a quote, commit scope, alter contract value, or contact the client.')}
                 </p>
               </div>
               <div className="modal-actions">
                 <button type="button" className="secondary-button" onClick={closeCommercialDialog}>
-                  Cancel
+                  {ot('Cancel')}
                 </button>
                 <button className="primary-button" disabled={submitting || !commercialDraftReady}>
                   <ShieldCheck size={16} />
                   {submitting
-                    ? 'Saving...'
+                    ? ot('Saving...')
                     : commercialDraftMode === 'quote'
-                      ? selectedJob?.pricingBasis?.currentDecision?.selectedModel === 'time_and_materials' ? 'Retain T&M budget' : 'Retain fixed-price estimate'
-                      : 'Request change approval'}
+                      ? selectedJob?.pricingBasis?.currentDecision?.selectedModel === 'time_and_materials' ? ot('Retain T&M budget') : ot('Retain fixed-price estimate')
+                      : ot('Request change approval')}
                 </button>
               </div>
             </form>
@@ -16957,22 +16957,22 @@ function App() {
           >
             <div className="modal-heading">
               <div>
-                <p className="eyebrow">Client evidence verification</p>
-                <h2 id="commercial-acceptance-title">Record client acceptance</h2>
+                <p className="eyebrow">{ot('Client evidence verification')}</p>
+                <h2 id="commercial-acceptance-title">{ot('Record client acceptance')}</h2>
                 <p>
                   {commercialAcceptance.type === 'quote'
-                    ? `Quote ${currency.format(commercialAcceptance.record.subtotal || 0)} net`
+                    ? ot('Quote {amount} net', { amount: currency.format(commercialAcceptance.record.subtotal || 0) })
                     : commercialAcceptance.record.title}
                 </p>
               </div>
-              <button type="button" className="icon-button" aria-label="Close client acceptance" onClick={closeCommercialDialog}>
+              <button type="button" className="icon-button" aria-label={ot('Close client acceptance')} onClick={closeCommercialDialog}>
                 <X size={18} />
               </button>
             </div>
             <form onSubmit={submitCommercialAcceptance}>
               <div className="form-grid commercial-acceptance-form">
                 <label>
-                  Accepted on
+                  {ot('Accepted on')}
                   <input
                     autoFocus
                     required
@@ -16983,7 +16983,7 @@ function App() {
                   />
                 </label>
                 <label className="form-span">
-                  Evidence reference
+                  {ot('Evidence reference')}
                   <input
                     required
                     minLength="3"
@@ -16992,30 +16992,29 @@ function App() {
                     onChange={(event) =>
                       setCommercialAcceptanceDraft({ ...commercialAcceptanceDraft, evidenceReference: event.target.value })
                     }
-                    placeholder="Signed quote, portal decision, email, or document reference"
+                    placeholder={ot('Signed quote, portal decision, email, or document reference')}
                   />
                 </label>
                 <label className="form-span">
-                  Verification notes
+                  {ot('Verification notes')}
                   <textarea
                     maxLength="2000"
                     value={commercialAcceptanceDraft.notes}
                     onChange={(event) => setCommercialAcceptanceDraft({ ...commercialAcceptanceDraft, notes: event.target.value })}
-                    placeholder="Record where the evidence is retained and any conditions."
+                    placeholder={ot('Record where the evidence is retained and any conditions.')}
                   />
                 </label>
                 <p className="workflow-note form-span">
-                  This request does not claim acceptance by itself. Contract value changes only after a separate approver verifies the
-                  retained evidence.
+                  {ot('This request does not claim acceptance by itself. Contract value changes only after a separate approver verifies the retained evidence.')}
                 </p>
               </div>
               <div className="modal-actions">
                 <button type="button" className="secondary-button" onClick={closeCommercialDialog}>
-                  Cancel
+                  {ot('Cancel')}
                 </button>
                 <button className="primary-button" disabled={submitting || commercialAcceptanceDraft.evidenceReference.trim().length < 3}>
                   <ShieldCheck size={16} />
-                  {submitting ? 'Recording...' : 'Request verification'}
+                  {submitting ? ot('Recording...') : ot('Request verification')}
                 </button>
               </div>
             </form>
@@ -17037,21 +17036,21 @@ function App() {
           >
             <div className="modal-heading">
               <div>
-                <p className="eyebrow">Verified delivery evidence</p>
-                <h2 id="commercial-delivery-title">Record change-order delivery</h2>
+                <p className="eyebrow">{ot('Verified delivery evidence')}</p>
+                <h2 id="commercial-delivery-title">{ot('Record change-order delivery')}</h2>
                 <p>
                   {commercialDelivery.changeOrder.data?.issuePackage?.issueReference || commercialDelivery.changeOrder.title} /{' '}
                   {commercialDelivery.communication.data?.recipient}
                 </p>
               </div>
-              <button type="button" className="icon-button" aria-label="Close change-order delivery" onClick={closeCommercialDialog}>
+              <button type="button" className="icon-button" aria-label={ot('Close change-order delivery')} onClick={closeCommercialDialog}>
                 <X size={18} />
               </button>
             </div>
             <form onSubmit={submitChangeOrderDelivery}>
               <div className="form-grid commercial-acceptance-form">
                 <label>
-                  Configured integration ID
+                  {ot('Configured integration ID')}
                   <input
                     autoFocus
                     required
@@ -17065,7 +17064,7 @@ function App() {
                   />
                 </label>
                 <label>
-                  Provider message ID
+                  {ot('Provider message ID')}
                   <input
                     required
                     minLength="3"
@@ -17078,7 +17077,7 @@ function App() {
                   />
                 </label>
                 <label>
-                  Provider sent at
+                  {ot('Provider sent at')}
                   <input
                     required
                     type="datetime-local"
@@ -17087,13 +17086,12 @@ function App() {
                   />
                 </label>
                 <p className="workflow-note form-span">
-                  Record this only after the configured provider returns evidence for the approved recipient and exact package. Delivery
-                  does not authorize the work or alter contract value.
+                  {ot('Record this only after the configured provider returns evidence for the approved recipient and exact package. Delivery does not authorize the work or alter contract value.')}
                 </p>
               </div>
               <div className="modal-actions">
                 <button type="button" className="secondary-button" disabled={submitting} onClick={closeCommercialDialog}>
-                  Cancel
+                  {ot('Cancel')}
                 </button>
                 <button
                   className="primary-button"
@@ -17104,7 +17102,7 @@ function App() {
                     !commercialDeliveryDraft.sentAt
                   }
                 >
-                  <MailCheck size={15} /> {submitting ? 'Recording...' : 'Record verified receipt'}
+                  <MailCheck size={15} /> {submitting ? ot('Recording...') : ot('Record verified receipt')}
                 </button>
               </div>
             </form>
