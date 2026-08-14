@@ -2069,7 +2069,16 @@ app.use(cors({
 app.use(rateLimitApi);
 app.use(requireDashboardAuth);
 app.use((req, res, next) => {
-  if ((!isProduction && runtimeMode !== 'hosted') || !req.path.startsWith('/api/') || req.path === '/api/health/ready') {
+  const runtimeRecoveryRoute = [
+    '/api/session',
+    '/api/auth/login',
+    '/api/auth/logout',
+    '/api/health',
+    '/api/health/ready',
+    '/api/readiness',
+    '/api/operations/capabilities'
+  ].includes(req.path);
+  if ((!isProduction && runtimeMode !== 'hosted') || !req.path.startsWith('/api/') || runtimeRecoveryRoute) {
     return next();
   }
   if (runtimeConfiguration().ready) return next();
