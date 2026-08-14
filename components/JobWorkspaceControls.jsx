@@ -48,6 +48,7 @@ import {
   toIsoDateTime,
   toLocalDateTimeInput,
 } from '../dashboard-format'
+import { operatorText } from '../operator-locale'
 import Empty from './EmptyState'
 
 const FIELD_ASSURANCE_REVIEW_PRIORITY = [
@@ -259,14 +260,14 @@ function emptyDayworkAcknowledgement() {
   }
 }
 
-function takeoffMeasurementSummary(item = {}) {
+function takeoffMeasurementSummary(item = {}, t = (value) => value) {
   const dimensions = []
   if (item.measurementType !== 'manual') dimensions.push(`${item.count || 0}x`)
   if (['linear', 'area', 'volume'].includes(item.measurementType)) dimensions.push(`${item.length || 0} m`)
   if (['area', 'volume'].includes(item.measurementType)) dimensions.push(`x ${item.width || 0} m`)
   if (item.measurementType === 'volume') dimensions.push(`x ${item.height || 0} m`)
-  if (item.wastePercent) dimensions.push(`+ ${item.wastePercent}% waste`)
-  return dimensions.length ? dimensions.join(' ') : 'Manual retained quantity'
+  if (item.wastePercent) dimensions.push(t('+ {percent}% waste', { percent: item.wastePercent }))
+  return dimensions.length ? dimensions.join(' ') : t('Manual retained quantity')
 }
 
 function emptyRfiDraft() {
@@ -620,6 +621,7 @@ function pricingBasisPreview(factors = EMPTY_LIST) {
 function TakeoffControl({
   job,
   estimateRates,
+  locale,
   canCoordinate,
   canManagePolicy,
   submitting,
@@ -631,6 +633,7 @@ function TakeoffControl({
   onRemoveItem,
   onConvert,
 }) {
+  const t = (key, variables = {}) => operatorText(locale, key, variables)
   const activeRatePolicy = estimateRates?.activePolicy || null
   const currentPricingBasis = job.pricingBasis?.currentDecision || null
   const pricingBasisReady = Boolean(currentPricingBasis && job.pricingBasis?.stale !== true)
@@ -746,52 +749,62 @@ function TakeoffControl({
       <div className="section-heading takeoff-heading">
         <Ruler size={18} />
         <div>
-          <h3>WBS & quantity takeoff</h3>
-          <p>Structure work packages, measure retained scope, and convert one sealed basis into the approval-gated estimate workflow.</p>
+          <h3>{t('WBS & quantity takeoff')}</h3>
+          <p>{t('Structure work packages, measure retained scope, and convert one sealed basis into the approval-gated estimate workflow.')}</p>
         </div>
         {canCoordinate ? (
           <button type="button" className="secondary-button" disabled={submitting} onClick={onNewTakeoff}>
             <Plus size={15} />
-            New takeoff
+            {t('New takeoff')}
           </button>
         ) : null}
       </div>
       <div className={`estimate-rate-policy-strip ${activeRatePolicy ? 'rate-policy-active' : 'rate-policy-missing'}`} data-testid="estimate-rate-policy-control">
         <Calculator size={17} />
         <div>
-          <strong>{activeRatePolicy ? `${activeRatePolicy.policyName} / v${activeRatePolicy.versionNumber}` : 'Estimating rate policy required'}</strong>
+          <strong>{activeRatePolicy ? `${activeRatePolicy.policyName} / v${activeRatePolicy.versionNumber}` : t('Estimating rate policy required')}</strong>
           <span>
             {activeRatePolicy
-              ? `${activeRatePolicy.derived?.labourClasses?.length || 0} labour class(es) / ${activeRatePolicy.derived?.overheadMethod === 'labor_hour' ? `${rateMoney(activeRatePolicy.derived?.overheadPerLabourHour, activeRatePolicy.currency)} overhead per labour hour` : `${activeRatePolicy.derived?.directCostPercent || 0}% direct-cost overhead`} / ${activeRatePolicy.snapshot?.targetMarginPercent || 0}% target margin`
-              : 'No governed labour-burden and overhead basis is active.'}
+              ? t('{count} labour class(es) / {overhead} / {margin}% target margin', {
+                  count: activeRatePolicy.derived?.labourClasses?.length || 0,
+                  overhead: activeRatePolicy.derived?.overheadMethod === 'labor_hour'
+                    ? t('{amount} overhead per labour hour', { amount: rateMoney(activeRatePolicy.derived?.overheadPerLabourHour, activeRatePolicy.currency) })
+                    : t('{percent}% direct-cost overhead', { percent: activeRatePolicy.derived?.directCostPercent || 0 }),
+                  margin: activeRatePolicy.snapshot?.targetMarginPercent || 0,
+                })
+              : t('No governed labour-burden and overhead basis is active.')}
           </span>
         </div>
-        {pendingRatePolicies.length ? <span className="tag tag-amber">{pendingRatePolicies.length} pending approval</span> : null}
+        {pendingRatePolicies.length ? <span className="tag tag-amber">{t('{count} pending approval', { count: pendingRatePolicies.length })}</span> : null}
         {canManagePolicy ? (
           <button type="button" className="secondary-button" disabled={submitting || pendingRatePolicies.length > 0} onClick={openRatePolicyEditor}>
             <Pencil size={14} />
-            {activeRatePolicy ? 'Revise rates' : 'Configure rates'}
+            {activeRatePolicy ? t('Revise rates') : t('Configure rates')}
           </button>
         ) : null}
       </div>
       <div className={`takeoff-pricing-basis-strip ${pricingBasisReady ? 'pricing-basis-active' : 'pricing-basis-missing'}`} data-testid="takeoff-pricing-basis">
         <GitBranch size={17} />
         <div>
-          <strong>{pricingBasisReady ? pricingModelLabel(currentPricingBasis.selectedModel) : job.pricingBasis?.stale ? 'Pricing basis is stale' : 'Pricing basis required'}</strong>
+          <strong>{pricingBasisReady ? t(pricingModelLabel(currentPricingBasis.selectedModel)) : job.pricingBasis?.stale ? t('Pricing basis is stale') : t('Pricing basis required')}</strong>
           <span>
             {pricingBasisReady
-              ? `Decision v${currentPricingBasis.versionNumber} / ${currentPricingBasis.score}% fixed-price readiness / ${currentPricingBasis.snapshot?.override ? 'operator override retained' : 'recommendation followed'}`
-              : 'Estimate approval remains blocked until current scope and estimate evidence have been assessed.'}
+              ? t('Decision v{version} / {score}% fixed-price readiness / {basis}', {
+                  version: currentPricingBasis.versionNumber,
+                  score: currentPricingBasis.score,
+                  basis: currentPricingBasis.snapshot?.override ? t('operator override retained') : t('recommendation followed'),
+                })
+              : t('Estimate approval remains blocked until current scope and estimate evidence have been assessed.')}
           </span>
         </div>
-        {pricingBasisReady ? <span className="tag tag-green">Source current</span> : <span className="tag tag-amber">Action required</span>}
+        {pricingBasisReady ? <span className="tag tag-green">{t('Source current')}</span> : <span className="tag tag-amber">{t('Action required')}</span>}
       </div>
-      <div className="takeoff-summary" aria-label="Quantity takeoff summary">
-        <div><span>Sheets</span><strong>{takeoffs.length}</strong></div>
-        <div><span>Work packages</span><strong>{packageCount}</strong></div>
-        <div><span>Drafts</span><strong>{draftCount}</strong></div>
-        <div><span>Converted</span><strong>{convertedCount}</strong></div>
-        <div><span>Draft sell value</span><strong>{currency.format(draftValue)}</strong></div>
+      <div className="takeoff-summary" aria-label={t('Quantity takeoff summary')}>
+        <div><span>{t('Sheets')}</span><strong>{takeoffs.length}</strong></div>
+        <div><span>{t('Work packages')}</span><strong>{packageCount}</strong></div>
+        <div><span>{t('Drafts')}</span><strong>{draftCount}</strong></div>
+        <div><span>{t('Converted')}</span><strong>{convertedCount}</strong></div>
+        <div><span>{t('Draft sell value')}</span><strong>{currency.format(draftValue)}</strong></div>
       </div>
       {takeoffs.length ? (
         <div className="takeoff-register">
@@ -801,87 +814,96 @@ function TakeoffControl({
                 <div>
                   <div className="takeoff-sheet-title">
                     <strong>{takeoff.title}</strong>
-                    <span className={`status status-${takeoff.status}`}>{formatStatus(takeoff.status)}</span>
+                    <span className={`status status-${takeoff.status}`}>{t(formatStatus(takeoff.status))}</span>
                     {takeoff.status === 'converted' ? (
                       <span className={`tag ${takeoff.integrityValid ? 'tag-green' : 'tag-red'}`}>
-                        {takeoff.integrityValid ? 'Snapshot verified' : 'Integrity failed'}
+                        {takeoff.integrityValid ? t('Snapshot verified') : t('Integrity failed')}
                       </span>
                     ) : null}
                   </div>
                   <small>
-                    {takeoff.workBreakdown?.packageCount || 0} work package{takeoff.workBreakdown?.packageCount === 1 ? '' : 's'} / {takeoff.itemCount || 0} measurement{takeoff.itemCount === 1 ? '' : 's'} / VAT {takeoff.taxRate || 0}%
-                    {takeoff.quoteId ? ` / estimate ${takeoff.quoteId}` : ''}
+                    {t('{packages} work package(s) / {measurements} measurement(s) / VAT {vat}%', {
+                      packages: takeoff.workBreakdown?.packageCount || 0,
+                      measurements: takeoff.itemCount || 0,
+                      vat: takeoff.taxRate || 0,
+                    })}
+                    {takeoff.quoteId ? ` / ${t('estimate {id}', { id: takeoff.quoteId })}` : ''}
                   </small>
                 </div>
                 {canCoordinate && takeoff.status === 'draft' ? (
                   <div className="takeoff-sheet-actions">
                     <button type="button" className="secondary-button" disabled={submitting || takeoff.itemCount >= 50} onClick={() => onAddItem(takeoff)}>
                       <Plus size={14} />
-                      Measurement
+                      {t('Measurement')}
                     </button>
                     <button
                       type="button"
                       className="secondary-button"
                       disabled={submitting || !takeoff.itemCount || takeoff.subtotal <= 0 || !pricingBasisReady}
-                      title={pricingBasisReady ? `Prepare a ${pricingModelLabel(currentPricingBasis.selectedModel).toLowerCase()} estimate` : 'A current pricing-basis decision is required'}
+                      title={pricingBasisReady ? t('Prepare a {model} estimate', { model: t(pricingModelLabel(currentPricingBasis.selectedModel)).toLowerCase() }) : t('A current pricing-basis decision is required')}
                       onClick={() => onConvert(takeoff)}
                     >
                       <ArrowUpRight size={14} />
-                      Prepare estimate
+                      {t('Prepare estimate')}
                     </button>
                   </div>
                 ) : null}
               </div>
-              <div className="takeoff-values" aria-label={`${takeoff.title} totals`}>
-                <div><span>Cost</span><strong>{currency.format(takeoff.totalCost || 0)}</strong></div>
-                <div><span>Sell net</span><strong>{currency.format(takeoff.subtotal || 0)}</strong></div>
-                <div><span>Margin</span><strong>{currency.format(takeoff.marginAmount || 0)} / {takeoff.marginPercent || 0}%</strong></div>
-                <div><span>Gross</span><strong>{currency.format(takeoff.total || 0)}</strong></div>
+              <div className="takeoff-values" aria-label={t('{title} totals', { title: takeoff.title })}>
+                <div><span>{t('Cost')}</span><strong>{currency.format(takeoff.totalCost || 0)}</strong></div>
+                <div><span>{t('Sell net')}</span><strong>{currency.format(takeoff.subtotal || 0)}</strong></div>
+                <div><span>{t('Margin')}</span><strong>{currency.format(takeoff.marginAmount || 0)} / {takeoff.marginPercent || 0}%</strong></div>
+                <div><span>{t('Gross')}</span><strong>{currency.format(takeoff.total || 0)}</strong></div>
               </div>
               {takeoff.workBreakdown?.nodes?.length ? (
-                <div className="takeoff-wbs" role="table" aria-label={`${takeoff.title} work breakdown`}>
+                <div className="takeoff-wbs" role="table" aria-label={t('{title} work breakdown', { title: takeoff.title })}>
                   <div className="takeoff-wbs-heading" role="row">
-                    <strong role="columnheader">WBS work package</strong>
-                    <span role="columnheader">Measurements</span>
-                    <span role="columnheader">Cost</span>
-                    <span role="columnheader">Sell</span>
-                    <span role="columnheader">Margin</span>
+                    <strong role="columnheader">{t('WBS work package')}</strong>
+                    <span role="columnheader">{t('Measurements')}</span>
+                    <span role="columnheader">{t('Cost')}</span>
+                    <span role="columnheader">{t('Sell')}</span>
+                    <span role="columnheader">{t('Margin')}</span>
                   </div>
                   {takeoff.workBreakdown.nodes.map((node) => (
                     <div className="takeoff-wbs-row" role="row" key={node.code} data-testid={`takeoff-wbs-${takeoff.id}-${node.code}`}>
                       <div role="cell"><strong>{node.code}</strong><span>{node.name}</span></div>
-                      <span role="cell"><small>Measurements</small><strong>{node.itemCount}</strong></span>
-                      <span role="cell"><small>Cost</small><strong>{currency.format(node.totalCost || 0)}</strong></span>
-                      <span role="cell"><small>Sell</small><strong>{currency.format(node.totalPrice || 0)}</strong></span>
-                      <span role="cell"><small>Margin</small><strong>{currency.format(node.marginAmount || 0)} / {node.marginPercent || 0}%</strong></span>
+                      <span role="cell"><small>{t('Measurements')}</small><strong>{node.itemCount}</strong></span>
+                      <span role="cell"><small>{t('Cost')}</small><strong>{currency.format(node.totalCost || 0)}</strong></span>
+                      <span role="cell"><small>{t('Sell')}</small><strong>{currency.format(node.totalPrice || 0)}</strong></span>
+                      <span role="cell"><small>{t('Margin')}</small><strong>{currency.format(node.marginAmount || 0)} / {node.marginPercent || 0}%</strong></span>
                     </div>
                   ))}
                 </div>
               ) : null}
               {takeoff.items?.length ? (
-                <div className="takeoff-items" role="table" aria-label={`${takeoff.title} measurements`}>
+                <div className="takeoff-items" role="table" aria-label={t('{title} measurements', { title: takeoff.title })}>
                   {takeoff.items.map((item) => (
                     <div className="takeoff-item" role="row" key={item.id}>
                       <div className="takeoff-item-copy" role="cell">
                         <div>
                           <strong>{item.description}</strong>
                           <span className="tag tag-wbs">{item.wbsCode} / {item.workPackage}</span>
-                          <span className="tag">{formatStatus(item.category)}</span>
+                          <span className="tag">{t(formatStatus(item.category))}</span>
                           {item.rateBuildUpHash ? (
                             <span className={`tag ${item.rateIntegrityValid ? 'tag-green' : 'tag-red'}`}>
-                              {item.rateIntegrityValid ? `Rate v${item.rateBuildUp?.policy?.versionNumber}` : 'Rate integrity failed'}
+                              {item.rateIntegrityValid ? t('Rate v{version}', { version: item.rateBuildUp?.policy?.versionNumber }) : t('Rate integrity failed')}
                             </span>
                           ) : null}
                         </div>
-                        <small>{takeoffMeasurementSummary(item)} / {item.sourceReference || 'No drawing reference'}</small>
+                        <small>{takeoffMeasurementSummary(item, t)} / {item.sourceReference || t('No drawing reference')}</small>
                         {item.rateBuildUp?.calculation ? (
                           <small className="takeoff-rate-summary">
-                            Labour {rateMoney(item.rateBuildUp.calculation.labourCostPerUnit, takeoff.currency)} / overhead {rateMoney(item.rateBuildUp.calculation.overheadRecoveryPerUnit, takeoff.currency)} / cost {rateMoney(item.rateBuildUp.calculation.unitCost, takeoff.currency)} / margin {item.rateBuildUp.calculation.targetMarginPercent}%
+                            {t('Labour {labour} / overhead {overhead} / cost {cost} / margin {margin}%', {
+                              labour: rateMoney(item.rateBuildUp.calculation.labourCostPerUnit, takeoff.currency),
+                              overhead: rateMoney(item.rateBuildUp.calculation.overheadRecoveryPerUnit, takeoff.currency),
+                              cost: rateMoney(item.rateBuildUp.calculation.unitCost, takeoff.currency),
+                              margin: item.rateBuildUp.calculation.targetMarginPercent,
+                            })}
                           </small>
                         ) : null}
                       </div>
                       <div className="takeoff-item-quantity" role="cell">
-                        <span>Quantity</span>
+                        <span>{t('Quantity')}</span>
                         <strong>{item.quantity} {item.unit}</strong>
                       </div>
                       <div className="takeoff-item-money" role="cell">
@@ -893,17 +915,17 @@ function TakeoffControl({
                           <button
                             type="button"
                             className="icon-button"
-                            aria-label={`Build rate ${item.description}`}
-                            title={activeRatePolicy ? 'Unit-rate build-up' : 'Approve an estimating rate policy first'}
+                            aria-label={t('Build rate {description}', { description: item.description })}
+                            title={activeRatePolicy ? t('Unit-rate build-up') : t('Approve an estimating rate policy first')}
                             disabled={submitting || !activeRatePolicy}
                             onClick={() => openRateBuildUp(takeoff, item)}
                           >
                             <Calculator size={15} />
                           </button>
-                          <button type="button" className="icon-button" aria-label={`Edit ${item.description}`} disabled={submitting} onClick={() => onEditItem(takeoff, item)}>
+                          <button type="button" className="icon-button" aria-label={t('Edit {description}', { description: item.description })} disabled={submitting} onClick={() => onEditItem(takeoff, item)}>
                             <Pencil size={15} />
                           </button>
-                          <button type="button" className="icon-button" aria-label={`Remove ${item.description}`} disabled={submitting} onClick={() => onRemoveItem(takeoff, item)}>
+                          <button type="button" className="icon-button" aria-label={t('Remove {description}', { description: item.description })} disabled={submitting} onClick={() => onRemoveItem(takeoff, item)}>
                             <X size={15} />
                           </button>
                         </div>
@@ -912,41 +934,41 @@ function TakeoffControl({
                   ))}
                 </div>
               ) : (
-                <p className="workflow-note">No measurements retained yet. Add a count, length, area, volume, or manual quantity.</p>
+                <p className="workflow-note">{t('No measurements retained yet. Add a count, length, area, volume, or manual quantity.')}</p>
               )}
             </article>
           ))}
         </div>
       ) : (
-        <Empty title="No WBS or quantity takeoffs" detail="Create a structured measured scope before preparing an estimate from drawings, surveys, or site dimensions." />
+        <Empty title={t('No WBS or quantity takeoffs')} detail={t('Create a structured measured scope before preparing an estimate from drawings, surveys, or site dimensions.')} />
       )}
       {editingRatePolicy ? (
         <div className="estimate-rate-editor-wrap" role="presentation">
           <form className="estimate-rate-editor" role="dialog" aria-modal="true" aria-labelledby="estimate-rate-policy-title" onSubmit={submitRatePolicy}>
             <div className="panel-heading">
               <div>
-                <h3 id="estimate-rate-policy-title">Estimating rate policy revision</h3>
-                <p>Labour burden, productive utilization, overhead recovery, and target margin.</p>
+                <h3 id="estimate-rate-policy-title">{t('Estimating rate policy revision')}</h3>
+                <p>{t('Labour burden, productive utilization, overhead recovery, and target margin.')}</p>
               </div>
-              <button type="button" className="icon-button" aria-label="Close estimating rate policy editor" onClick={() => setEditingRatePolicy(false)}><X size={16} /></button>
+              <button type="button" className="icon-button" aria-label={t('Close estimating rate policy editor')} onClick={() => setEditingRatePolicy(false)}><X size={16} /></button>
             </div>
             <div className="form-grid estimate-rate-policy-grid">
-              <label className="form-span">Policy name<input autoFocus required minLength="2" maxLength="120" value={ratePolicyDraft.policyName} onChange={(event) => setRatePolicyDraft({ ...ratePolicyDraft, policyName: event.target.value })} /></label>
-              <label>Currency<input required maxLength="3" value={ratePolicyDraft.currency} onChange={(event) => setRatePolicyDraft({ ...ratePolicyDraft, currency: event.target.value.toUpperCase() })} /></label>
-              <label>Target margin (%)<input required type="number" min="0" max="90" step="0.01" value={ratePolicyDraft.targetMarginPercent} onChange={(event) => setRatePolicyDraft({ ...ratePolicyDraft, targetMarginPercent: event.target.value })} /></label>
+              <label className="form-span">{t('Policy name')}<input autoFocus required minLength="2" maxLength="120" value={ratePolicyDraft.policyName} onChange={(event) => setRatePolicyDraft({ ...ratePolicyDraft, policyName: event.target.value })} /></label>
+              <label>{t('Currency')}<input required maxLength="3" value={ratePolicyDraft.currency} onChange={(event) => setRatePolicyDraft({ ...ratePolicyDraft, currency: event.target.value.toUpperCase() })} /></label>
+              <label>{t('Target margin (%)')}<input required type="number" min="0" max="90" step="0.01" value={ratePolicyDraft.targetMarginPercent} onChange={(event) => setRatePolicyDraft({ ...ratePolicyDraft, targetMarginPercent: event.target.value })} /></label>
             </div>
             <fieldset className="estimate-rate-fieldset">
-              <legend>Labour classes</legend>
+              <legend>{t('Labour classes')}</legend>
               <div className="estimate-rate-labour-list">
                 {ratePolicyDraft.labourClasses.map((row, index) => (
                   <div className="estimate-rate-labour-row" key={`${row.code}-${index}`}>
-                    <label>Class code<input required maxLength="24" value={row.code} onChange={(event) => updateLabourClass(index, { code: event.target.value.toUpperCase() })} /></label>
-                    <label>Class name<input required minLength="2" maxLength="80" value={row.name} onChange={(event) => updateLabourClass(index, { name: event.target.value })} /></label>
-                    <label>Base hourly rate<input required type="number" min="0.01" max="10000" step="0.01" value={row.baseHourlyRate} onChange={(event) => updateLabourClass(index, { baseHourlyRate: event.target.value })} /></label>
+                    <label>{t('Class code')}<input required maxLength="24" value={row.code} onChange={(event) => updateLabourClass(index, { code: event.target.value.toUpperCase() })} /></label>
+                    <label>{t('Class name')}<input required minLength="2" maxLength="80" value={row.name} onChange={(event) => updateLabourClass(index, { name: event.target.value })} /></label>
+                    <label>{t('Base hourly rate')}<input required type="number" min="0.01" max="10000" step="0.01" value={row.baseHourlyRate} onChange={(event) => updateLabourClass(index, { baseHourlyRate: event.target.value })} /></label>
                     <button
                       type="button"
                       className="icon-button"
-                      aria-label={`Remove labour class ${row.name || index + 1}`}
+                      aria-label={t('Remove labour class {name}', { name: row.name || index + 1 })}
                       disabled={ratePolicyDraft.labourClasses.length === 1}
                       onClick={() => setRatePolicyDraft((current) => ({ ...current, labourClasses: current.labourClasses.filter((_, rowIndex) => rowIndex !== index) }))}
                     ><X size={15} /></button>
@@ -961,32 +983,32 @@ function TakeoffControl({
                   ...current,
                   labourClasses: [...current.labourClasses, { code: `CLASS${current.labourClasses.length + 1}`, name: '', baseHourlyRate: '' }],
                 }))}
-              ><Plus size={14} /> Labour class</button>
+              ><Plus size={14} /> {t('Labour class')}</button>
             </fieldset>
             <fieldset className="estimate-rate-fieldset">
-              <legend>Labour burden assumptions</legend>
+              <legend>{t('Labour burden assumptions')}</legend>
               <div className="form-grid estimate-rate-assumption-grid">
-                <label>Paid leave (%)<input required type="number" min="0" max="100" step="0.01" value={ratePolicyDraft.paidLeavePercent} onChange={(event) => setRatePolicyDraft({ ...ratePolicyDraft, paidLeavePercent: event.target.value })} /></label>
-                <label>Employer costs (%)<input required type="number" min="0" max="100" step="0.01" value={ratePolicyDraft.statutoryEmployerCostsPercent} onChange={(event) => setRatePolicyDraft({ ...ratePolicyDraft, statutoryEmployerCostsPercent: event.target.value })} /></label>
-                <label>Pension and benefits (%)<input required type="number" min="0" max="100" step="0.01" value={ratePolicyDraft.pensionBenefitsPercent} onChange={(event) => setRatePolicyDraft({ ...ratePolicyDraft, pensionBenefitsPercent: event.target.value })} /></label>
-                <label>Insurance and other (%)<input required type="number" min="0" max="100" step="0.01" value={ratePolicyDraft.insuranceOtherPercent} onChange={(event) => setRatePolicyDraft({ ...ratePolicyDraft, insuranceOtherPercent: event.target.value })} /></label>
-                <label>Productive utilization (%)<input required type="number" min="1" max="100" step="0.01" value={ratePolicyDraft.productiveUtilizationPercent} onChange={(event) => setRatePolicyDraft({ ...ratePolicyDraft, productiveUtilizationPercent: event.target.value })} /></label>
+                <label>{t('Paid leave (%)')}<input required type="number" min="0" max="100" step="0.01" value={ratePolicyDraft.paidLeavePercent} onChange={(event) => setRatePolicyDraft({ ...ratePolicyDraft, paidLeavePercent: event.target.value })} /></label>
+                <label>{t('Employer costs (%)')}<input required type="number" min="0" max="100" step="0.01" value={ratePolicyDraft.statutoryEmployerCostsPercent} onChange={(event) => setRatePolicyDraft({ ...ratePolicyDraft, statutoryEmployerCostsPercent: event.target.value })} /></label>
+                <label>{t('Pension and benefits (%)')}<input required type="number" min="0" max="100" step="0.01" value={ratePolicyDraft.pensionBenefitsPercent} onChange={(event) => setRatePolicyDraft({ ...ratePolicyDraft, pensionBenefitsPercent: event.target.value })} /></label>
+                <label>{t('Insurance and other (%)')}<input required type="number" min="0" max="100" step="0.01" value={ratePolicyDraft.insuranceOtherPercent} onChange={(event) => setRatePolicyDraft({ ...ratePolicyDraft, insuranceOtherPercent: event.target.value })} /></label>
+                <label>{t('Productive utilization (%)')}<input required type="number" min="1" max="100" step="0.01" value={ratePolicyDraft.productiveUtilizationPercent} onChange={(event) => setRatePolicyDraft({ ...ratePolicyDraft, productiveUtilizationPercent: event.target.value })} /></label>
               </div>
             </fieldset>
             <fieldset className="estimate-rate-fieldset">
-              <legend>Overhead recovery</legend>
+              <legend>{t('Overhead recovery')}</legend>
               <div className="form-grid estimate-rate-assumption-grid">
-                <label>Method<select value={ratePolicyDraft.overheadMethod} onChange={(event) => setRatePolicyDraft({ ...ratePolicyDraft, overheadMethod: event.target.value })}><option value="labor_hour">Per labour hour</option><option value="direct_cost_percent">Direct-cost percentage</option></select></label>
-                <label>Annual overhead<input required type="number" min="0" max="1000000000" step="0.01" value={ratePolicyDraft.annualOverhead} onChange={(event) => setRatePolicyDraft({ ...ratePolicyDraft, annualOverhead: event.target.value })} /></label>
-                <label>Annual productive labour hours<input required={ratePolicyDraft.overheadMethod === 'labor_hour'} type="number" min={ratePolicyDraft.overheadMethod === 'labor_hour' ? '1' : '0'} max="10000000" step="0.01" value={ratePolicyDraft.annualProductiveLabourHours} onChange={(event) => setRatePolicyDraft({ ...ratePolicyDraft, annualProductiveLabourHours: event.target.value })} /></label>
-                <label>Direct-cost overhead (%)<input required type="number" min="0" max="500" step="0.01" value={ratePolicyDraft.directCostPercent} onChange={(event) => setRatePolicyDraft({ ...ratePolicyDraft, directCostPercent: event.target.value })} /></label>
+                <label>{t('Method')}<select value={ratePolicyDraft.overheadMethod} onChange={(event) => setRatePolicyDraft({ ...ratePolicyDraft, overheadMethod: event.target.value })}><option value="labor_hour">{t('Per labour hour')}</option><option value="direct_cost_percent">{t('Direct-cost percentage')}</option></select></label>
+                <label>{t('Annual overhead')}<input required type="number" min="0" max="1000000000" step="0.01" value={ratePolicyDraft.annualOverhead} onChange={(event) => setRatePolicyDraft({ ...ratePolicyDraft, annualOverhead: event.target.value })} /></label>
+                <label>{t('Annual productive labour hours')}<input required={ratePolicyDraft.overheadMethod === 'labor_hour'} type="number" min={ratePolicyDraft.overheadMethod === 'labor_hour' ? '1' : '0'} max="10000000" step="0.01" value={ratePolicyDraft.annualProductiveLabourHours} onChange={(event) => setRatePolicyDraft({ ...ratePolicyDraft, annualProductiveLabourHours: event.target.value })} /></label>
+                <label>{t('Direct-cost overhead (%)')}<input required type="number" min="0" max="500" step="0.01" value={ratePolicyDraft.directCostPercent} onChange={(event) => setRatePolicyDraft({ ...ratePolicyDraft, directCostPercent: event.target.value })} /></label>
               </div>
             </fieldset>
-            <label className="estimate-rate-reason">Revision reason<textarea required minLength="8" maxLength="500" value={ratePolicyDraft.reason} onChange={(event) => setRatePolicyDraft({ ...ratePolicyDraft, reason: event.target.value })} /></label>
-            <p className="workflow-note">Policy approval changes only future internal draft calculations. Worker directory rates and existing measurements remain unchanged.</p>
+            <label className="estimate-rate-reason">{t('Revision reason')}<textarea required minLength="8" maxLength="500" value={ratePolicyDraft.reason} onChange={(event) => setRatePolicyDraft({ ...ratePolicyDraft, reason: event.target.value })} /></label>
+            <p className="workflow-note">{t('Policy approval changes only future internal draft calculations. Worker directory rates and existing measurements remain unchanged.')}</p>
             <div className="modal-actions">
-              <button type="button" className="secondary-button" onClick={() => setEditingRatePolicy(false)}>Cancel</button>
-              <button className="primary-button" disabled={submitting || !ratePolicyReady}><ChevronRight size={15} /> Request approval</button>
+              <button type="button" className="secondary-button" onClick={() => setEditingRatePolicy(false)}>{t('Cancel')}</button>
+              <button className="primary-button" disabled={submitting || !ratePolicyReady}><ChevronRight size={15} /> {t('Request approval')}</button>
             </div>
           </form>
         </div>
@@ -996,41 +1018,41 @@ function TakeoffControl({
           <form className="estimate-rate-editor unit-rate-editor" role="dialog" aria-modal="true" aria-labelledby="unit-rate-title" onSubmit={submitRateBuildUp}>
             <div className="panel-heading">
               <div>
-                <h3 id="unit-rate-title">Unit-rate build-up</h3>
+                <h3 id="unit-rate-title">{t('Unit-rate build-up')}</h3>
                 <p>{rateBuildUpTarget.item.description} / {rateBuildUpTarget.item.unit}</p>
               </div>
-              <button type="button" className="icon-button" aria-label="Close unit-rate build-up" onClick={() => { setRateBuildUpTarget(null); setRateBuildUpDraft(null) }}><X size={16} /></button>
+              <button type="button" className="icon-button" aria-label={t('Close unit-rate build-up')} onClick={() => { setRateBuildUpTarget(null); setRateBuildUpDraft(null) }}><X size={16} /></button>
             </div>
             <div className="form-grid unit-rate-input-grid">
-              <label>Labour class<select value={rateBuildUpDraft.labourClassCode} onChange={(event) => setRateBuildUpDraft({ ...rateBuildUpDraft, labourClassCode: event.target.value })}>{(activeRatePolicy.derived?.labourClasses || EMPTY_LIST).map((row) => <option key={row.code} value={row.code}>{row.name} / {rateMoney(row.fullyBurdenedHourlyRate, activeRatePolicy.currency)}/h</option>)}</select></label>
-              <label>Labour hours / unit<input required type="number" min="0" max="1000000" step="0.0001" value={rateBuildUpDraft.labourHoursPerUnit} onChange={(event) => setRateBuildUpDraft({ ...rateBuildUpDraft, labourHoursPerUnit: event.target.value })} /></label>
-              <label>Material / unit<input required type="number" min="0" max="1000000000" step="0.01" value={rateBuildUpDraft.materialCostPerUnit} onChange={(event) => setRateBuildUpDraft({ ...rateBuildUpDraft, materialCostPerUnit: event.target.value })} /></label>
-              <label>Equipment / unit<input required type="number" min="0" max="1000000000" step="0.01" value={rateBuildUpDraft.equipmentCostPerUnit} onChange={(event) => setRateBuildUpDraft({ ...rateBuildUpDraft, equipmentCostPerUnit: event.target.value })} /></label>
-              <label>Subcontract / unit<input required type="number" min="0" max="1000000000" step="0.01" value={rateBuildUpDraft.subcontractCostPerUnit} onChange={(event) => setRateBuildUpDraft({ ...rateBuildUpDraft, subcontractCostPerUnit: event.target.value })} /></label>
-              <label>Other direct / unit<input required type="number" min="0" max="1000000000" step="0.01" value={rateBuildUpDraft.otherDirectCostPerUnit} onChange={(event) => setRateBuildUpDraft({ ...rateBuildUpDraft, otherDirectCostPerUnit: event.target.value })} /></label>
-              <label>Target margin (%)<input required type="number" min="0" max="90" step="0.01" value={rateBuildUpDraft.targetMarginPercent} onChange={(event) => setRateBuildUpDraft({ ...rateBuildUpDraft, targetMarginPercent: event.target.value })} /></label>
+              <label>{t('Labour class')}<select value={rateBuildUpDraft.labourClassCode} onChange={(event) => setRateBuildUpDraft({ ...rateBuildUpDraft, labourClassCode: event.target.value })}>{(activeRatePolicy.derived?.labourClasses || EMPTY_LIST).map((row) => <option key={row.code} value={row.code}>{row.name} / {rateMoney(row.fullyBurdenedHourlyRate, activeRatePolicy.currency)}/h</option>)}</select></label>
+              <label>{t('Labour hours / unit')}<input required type="number" min="0" max="1000000" step="0.0001" value={rateBuildUpDraft.labourHoursPerUnit} onChange={(event) => setRateBuildUpDraft({ ...rateBuildUpDraft, labourHoursPerUnit: event.target.value })} /></label>
+              <label>{t('Material / unit')}<input required type="number" min="0" max="1000000000" step="0.01" value={rateBuildUpDraft.materialCostPerUnit} onChange={(event) => setRateBuildUpDraft({ ...rateBuildUpDraft, materialCostPerUnit: event.target.value })} /></label>
+              <label>{t('Equipment / unit')}<input required type="number" min="0" max="1000000000" step="0.01" value={rateBuildUpDraft.equipmentCostPerUnit} onChange={(event) => setRateBuildUpDraft({ ...rateBuildUpDraft, equipmentCostPerUnit: event.target.value })} /></label>
+              <label>{t('Subcontract / unit')}<input required type="number" min="0" max="1000000000" step="0.01" value={rateBuildUpDraft.subcontractCostPerUnit} onChange={(event) => setRateBuildUpDraft({ ...rateBuildUpDraft, subcontractCostPerUnit: event.target.value })} /></label>
+              <label>{t('Other direct / unit')}<input required type="number" min="0" max="1000000000" step="0.01" value={rateBuildUpDraft.otherDirectCostPerUnit} onChange={(event) => setRateBuildUpDraft({ ...rateBuildUpDraft, otherDirectCostPerUnit: event.target.value })} /></label>
+              <label>{t('Target margin (%)')}<input required type="number" min="0" max="90" step="0.01" value={rateBuildUpDraft.targetMarginPercent} onChange={(event) => setRateBuildUpDraft({ ...rateBuildUpDraft, targetMarginPercent: event.target.value })} /></label>
             </div>
-            {ratePreview?.marginOverride ? <label className="estimate-rate-reason">Margin override reason<textarea required minLength="8" maxLength="500" value={rateBuildUpDraft.marginOverrideReason} onChange={(event) => setRateBuildUpDraft({ ...rateBuildUpDraft, marginOverrideReason: event.target.value })} /></label> : null}
+            {ratePreview?.marginOverride ? <label className="estimate-rate-reason">{t('Margin override reason')}<textarea required minLength="8" maxLength="500" value={rateBuildUpDraft.marginOverrideReason} onChange={(event) => setRateBuildUpDraft({ ...rateBuildUpDraft, marginOverrideReason: event.target.value })} /></label> : null}
             {ratePreview ? (
-              <div className="unit-rate-preview" aria-label="Unit-rate calculation preview">
-                <div><span>Burdened labour</span><strong>{rateMoney(ratePreview.labourCost, activeRatePolicy.currency)}</strong></div>
-                <div><span>Direct cost</span><strong>{rateMoney(ratePreview.directCost, activeRatePolicy.currency)}</strong></div>
-                <div><span>Overhead recovery</span><strong>{rateMoney(ratePreview.overhead, activeRatePolicy.currency)}</strong></div>
-                <div><span>Unit cost</span><strong>{rateMoney(ratePreview.unitCost, activeRatePolicy.currency)}</strong></div>
-                <div><span>Unit sell rate</span><strong>{rateMoney(ratePreview.unitSellRate, activeRatePolicy.currency)}</strong></div>
-                <div><span>Equivalent markup</span><strong>{ratePreview.markupPercent}%</strong></div>
+              <div className="unit-rate-preview" aria-label={t('Unit-rate calculation preview')}>
+                <div><span>{t('Burdened labour')}</span><strong>{rateMoney(ratePreview.labourCost, activeRatePolicy.currency)}</strong></div>
+                <div><span>{t('Direct cost')}</span><strong>{rateMoney(ratePreview.directCost, activeRatePolicy.currency)}</strong></div>
+                <div><span>{t('Overhead recovery')}</span><strong>{rateMoney(ratePreview.overhead, activeRatePolicy.currency)}</strong></div>
+                <div><span>{t('Unit cost')}</span><strong>{rateMoney(ratePreview.unitCost, activeRatePolicy.currency)}</strong></div>
+                <div><span>{t('Unit sell rate')}</span><strong>{rateMoney(ratePreview.unitSellRate, activeRatePolicy.currency)}</strong></div>
+                <div><span>{t('Equivalent markup')}</span><strong>{ratePreview.markupPercent}%</strong></div>
               </div>
             ) : null}
-            <p className="workflow-note">This updates only the selected draft measurement. Estimate conversion remains approval-gated.</p>
+            <p className="workflow-note">{t('This updates only the selected draft measurement. Estimate conversion remains approval-gated.')}</p>
             <div className="modal-actions">
-              <button type="button" className="secondary-button" onClick={() => { setRateBuildUpTarget(null); setRateBuildUpDraft(null) }}>Cancel</button>
-              <button className="primary-button" disabled={submitting || !rateBuildUpReady}><Calculator size={15} /> Apply build-up</button>
+              <button type="button" className="secondary-button" onClick={() => { setRateBuildUpTarget(null); setRateBuildUpDraft(null) }}>{t('Cancel')}</button>
+              <button className="primary-button" disabled={submitting || !rateBuildUpReady}><Calculator size={15} /> {t('Apply build-up')}</button>
             </div>
           </form>
         </div>
       ) : null}
       <p className="workflow-note">
-        Takeoff conversion seals the WBS, measured basis, and package rollups into one internal quote approval. It does not issue a proposal, contact the client, or alter contract value.
+        {t('Takeoff conversion seals the WBS, measured basis, and package rollups into one internal quote approval. It does not issue a proposal, contact the client, or alter contract value.')}
       </p>
     </section>
   )

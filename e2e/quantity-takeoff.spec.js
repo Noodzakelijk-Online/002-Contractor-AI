@@ -273,4 +273,17 @@ test('operator measures scope and seals it into one approval-gated estimate', as
   }));
   expect(geometry.pageWidth).toBeLessThanOrEqual(geometry.viewportWidth);
   expect(geometry.scrollWidth).toBeLessThanOrEqual(geometry.clientWidth);
+
+  await page.getByLabel('Language', { exact: true }).selectOption('nl-NL');
+  await expect(takeoffControl.getByRole('heading', { name: 'WBS en hoeveelhedenstaat' })).toBeVisible();
+  await expect(sheet.getByText('Ground floor measured scope', { exact: true })).toBeVisible();
+  await expect(sheet.getByText('03.20 / Floor finishes', { exact: true })).toBeVisible();
+  await expect(takeoffControl.getByText('Werkpakketten', { exact: true }).first()).toBeVisible();
+  await takeoffControl.getByRole('button', { name: 'Tarieven herzien' }).click();
+  ratePolicyDialog = page.getByRole('dialog', { name: 'Herziening calculatietarievenbeleid' });
+  await expect(ratePolicyDialog.getByLabel('Basisuurtarief')).toHaveValue('40');
+  await expect(ratePolicyDialog.getByRole('button', { name: 'Goedkeuring aanvragen' })).toBeVisible();
+  await ratePolicyDialog.getByRole('button', { name: 'Editor voor calculatietarieven sluiten' }).click();
+  await page.getByLabel('Taal', { exact: true }).selectOption('en-GB');
+  await expect(takeoffControl.getByRole('heading', { name: 'WBS & quantity takeoff' })).toBeVisible();
 });

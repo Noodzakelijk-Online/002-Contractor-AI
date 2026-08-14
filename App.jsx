@@ -3316,6 +3316,22 @@ function App() {
   const dashboard = data?.dashboard
   const operator = data?.session?.operator || { role: 'owner' }
   const operatorLocale = normalizeLocale(operator.preferences?.locale)
+  const [operatorTranslator, setOperatorTranslator] = useState(null)
+  const ot = (key, variables = {}) => operatorLocale === 'nl-NL' && operatorTranslator
+    ? operatorTranslator(operatorLocale, key, variables)
+    : Object.entries(variables).reduce(
+        (text, [name, value]) => text.replaceAll(`{${name}}`, String(value)),
+        key,
+      )
+
+  useEffect(() => {
+    if (operatorLocale !== 'nl-NL') return undefined
+    let active = true
+    import('./operator-locale').then((module) => {
+      if (active) setOperatorTranslator(() => module.operatorText)
+    })
+    return () => { active = false }
+  }, [operatorLocale])
   setDashboardLocale(operatorLocale)
   const fieldScoped = operator.fieldScoped === true
   const outboxScope = fieldOutboxOperatorScope(operator)
@@ -15762,6 +15778,7 @@ function App() {
                     <TakeoffControl
                       job={selectedJob}
                       estimateRates={estimateRates}
+                      locale={operatorLocale}
                       canCoordinate={canCoordinate}
                       canManagePolicy={canManageMarketFitPolicy}
                       submitting={submitting}
@@ -16279,18 +16296,18 @@ function App() {
           >
             <div className="modal-heading">
               <div>
-                <p className="eyebrow">Measured scope</p>
-                <h2 id="takeoff-create-title">New quantity takeoff</h2>
-                <p>{selectedJob?.title} / internal draft</p>
+                <p className="eyebrow">{ot('Measured scope')}</p>
+                <h2 id="takeoff-create-title">{ot('New quantity takeoff')}</h2>
+                <p>{selectedJob?.title} / {ot('internal draft')}</p>
               </div>
-              <button type="button" className="icon-button" aria-label="Close quantity takeoff" onClick={closeTakeoffDialog}>
+              <button type="button" className="icon-button" aria-label={ot('Close quantity takeoff')} onClick={closeTakeoffDialog}>
                 <X size={18} />
               </button>
             </div>
             <form onSubmit={submitTakeoff}>
               <div className="takeoff-modal-body form-grid">
                 <label className="form-span">
-                  Takeoff title
+                  {ot('Takeoff title')}
                   <input
                     autoFocus
                     required
@@ -16301,7 +16318,7 @@ function App() {
                   />
                 </label>
                 <label>
-                  VAT rate (%)
+                  {ot('VAT rate (%)')}
                   <input
                     required
                     type="number"
@@ -16313,21 +16330,21 @@ function App() {
                   />
                 </label>
                 <label className="form-span">
-                  Internal notes
+                  {ot('Internal notes')}
                   <textarea
                     maxLength="4000"
                     value={takeoffDraft.notes}
                     onChange={(event) => setTakeoffDraft({ ...takeoffDraft, notes: event.target.value })}
-                    placeholder="Record drawing revisions, survey assumptions, exclusions, or estimator context."
+                    placeholder={ot('Record drawing revisions, survey assumptions, exclusions, or estimator context.')}
                   />
                 </label>
-                <p className="workflow-note form-span">This creates an empty internal measurement sheet. It does not create or issue an estimate.</p>
+                <p className="workflow-note form-span">{ot('This creates an empty internal measurement sheet. It does not create or issue an estimate.')}</p>
               </div>
               <div className="modal-actions">
-                <button type="button" className="secondary-button" onClick={closeTakeoffDialog}>Cancel</button>
+                <button type="button" className="secondary-button" onClick={closeTakeoffDialog}>{ot('Cancel')}</button>
                 <button className="primary-button" disabled={submitting || takeoffDraft.title.trim().length < 2}>
                   <Ruler size={16} />
-                  {submitting ? 'Saving...' : 'Retain takeoff'}
+                  {submitting ? ot('Saving...') : ot('Retain takeoff')}
                 </button>
               </div>
             </form>
@@ -16349,11 +16366,11 @@ function App() {
           >
             <div className="modal-heading">
               <div>
-                <p className="eyebrow">Server-calculated measurement</p>
-                <h2 id="takeoff-item-title">{takeoffDialog.mode === 'edit_item' ? 'Edit measurement' : 'Add measurement'}</h2>
+                <p className="eyebrow">{ot('Server-calculated measurement')}</p>
+                <h2 id="takeoff-item-title">{takeoffDialog.mode === 'edit_item' ? ot('Edit measurement') : ot('Add measurement')}</h2>
                 <p>{takeoffDialog.takeoff.title}</p>
               </div>
-              <button type="button" className="icon-button" aria-label="Close takeoff measurement" onClick={closeTakeoffDialog}>
+              <button type="button" className="icon-button" aria-label={ot('Close takeoff measurement')} onClick={closeTakeoffDialog}>
                 <X size={18} />
               </button>
             </div>
@@ -16361,7 +16378,7 @@ function App() {
               <div className="takeoff-modal-body">
                 <div className="form-grid takeoff-item-form">
                   <label className="form-span">
-                    Description
+                    {ot('Description')}
                     <input
                       autoFocus
                       required
@@ -16372,87 +16389,87 @@ function App() {
                     />
                   </label>
                   <label>
-                    Category
+                    {ot('Category')}
                     <select value={takeoffItemDraft.category} onChange={(event) => setTakeoffItemDraft({ ...takeoffItemDraft, category: event.target.value })}>
-                      <option value="material">Material</option>
-                      <option value="labor">Labor</option>
-                      <option value="equipment">Equipment</option>
-                      <option value="subcontract">Subcontract</option>
-                      <option value="other">Other</option>
+                      <option value="material">{ot('Material')}</option>
+                      <option value="labor">{ot('Labor')}</option>
+                      <option value="equipment">{ot('Equipment')}</option>
+                      <option value="subcontract">{ot('Subcontract')}</option>
+                      <option value="other">{ot('Other')}</option>
                     </select>
                   </label>
                   <label>
-                    Measurement type
+                    {ot('Measurement type')}
                     <select value={takeoffItemDraft.measurementType} onChange={(event) => changeTakeoffMeasurementType(event.target.value)}>
-                      <option value="count">Count</option>
-                      <option value="linear">Linear</option>
-                      <option value="area">Area</option>
-                      <option value="volume">Volume</option>
-                      <option value="manual">Manual quantity</option>
+                      <option value="count">{ot('Count')}</option>
+                      <option value="linear">{ot('Linear')}</option>
+                      <option value="area">{ot('Area')}</option>
+                      <option value="volume">{ot('Volume')}</option>
+                      <option value="manual">{ot('Manual quantity')}</option>
                     </select>
                   </label>
                   {takeoffItemDraft.measurementType === 'manual' ? (
                     <label>
-                      Quantity
+                      {ot('Quantity')}
                       <input required type="number" min="0.0001" max="1000000000" step="0.0001" value={takeoffItemDraft.quantity} onChange={(event) => setTakeoffItemDraft({ ...takeoffItemDraft, quantity: event.target.value })} />
                     </label>
                   ) : (
                     <label>
-                      Count
+                      {ot('Count')}
                       <input required type="number" min="0.0001" max="1000000" step="0.0001" value={takeoffItemDraft.count} onChange={(event) => setTakeoffItemDraft({ ...takeoffItemDraft, count: event.target.value })} />
                     </label>
                   )}
                   {['linear', 'area', 'volume'].includes(takeoffItemDraft.measurementType) ? (
                     <label>
-                      Length (m)
+                      {ot('Length (m)')}
                       <input required type="number" min="0.0001" max="1000000" step="0.0001" value={takeoffItemDraft.length} onChange={(event) => setTakeoffItemDraft({ ...takeoffItemDraft, length: event.target.value })} />
                     </label>
                   ) : null}
                   {['area', 'volume'].includes(takeoffItemDraft.measurementType) ? (
                     <label>
-                      Width (m)
+                      {ot('Width (m)')}
                       <input required type="number" min="0.0001" max="1000000" step="0.0001" value={takeoffItemDraft.width} onChange={(event) => setTakeoffItemDraft({ ...takeoffItemDraft, width: event.target.value })} />
                     </label>
                   ) : null}
                   {takeoffItemDraft.measurementType === 'volume' ? (
                     <label>
-                      Height (m)
+                      {ot('Height (m)')}
                       <input required type="number" min="0.0001" max="1000000" step="0.0001" value={takeoffItemDraft.height} onChange={(event) => setTakeoffItemDraft({ ...takeoffItemDraft, height: event.target.value })} />
                     </label>
                   ) : null}
                   <label>
-                    Waste (%)
+                    {ot('Waste (%)')}
                     <input required type="number" min="0" max="1000" step="0.01" value={takeoffItemDraft.wastePercent} onChange={(event) => setTakeoffItemDraft({ ...takeoffItemDraft, wastePercent: event.target.value })} />
                   </label>
                   <label>
-                    Unit
+                    {ot('Unit')}
                     <input required maxLength="24" value={takeoffItemDraft.unit} onChange={(event) => setTakeoffItemDraft({ ...takeoffItemDraft, unit: event.target.value })} />
                   </label>
                   <label>
-                    Unit cost
+                    {ot('Unit cost')}
                     <input required type="number" min="0" max="1000000000" step="0.01" value={takeoffItemDraft.unitCost} onChange={(event) => setTakeoffItemDraft({ ...takeoffItemDraft, unitCost: event.target.value })} />
                   </label>
                   <label>
-                    Unit sell price
+                    {ot('Unit sell price')}
                     <input required type="number" min="0" max="1000000000" step="0.01" value={takeoffItemDraft.unitPrice} onChange={(event) => setTakeoffItemDraft({ ...takeoffItemDraft, unitPrice: event.target.value })} />
                   </label>
                   <label>
-                    Cost code
+                    {ot('Cost code')}
                     <input maxLength="80" value={takeoffItemDraft.costCode} onChange={(event) => setTakeoffItemDraft({ ...takeoffItemDraft, costCode: event.target.value })} />
                   </label>
                   <label>
-                    WBS code
+                    {ot('WBS code')}
                     <input
                       required
                       maxLength="80"
                       pattern="[A-Za-z0-9][A-Za-z0-9-]{0,11}(\.[A-Za-z0-9][A-Za-z0-9-]{0,11}){0,7}"
-                      title="Use one to eight dot-separated work-breakdown segments, for example 01.20."
+                      title={ot('Use one to eight dot-separated work-breakdown segments, for example 01.20.')}
                       value={takeoffItemDraft.wbsCode}
                       onChange={(event) => setTakeoffItemDraft({ ...takeoffItemDraft, wbsCode: event.target.value })}
                     />
                   </label>
                   <label>
-                    Work package
+                    {ot('Work package')}
                     <input
                       required
                       minLength="2"
@@ -16462,22 +16479,22 @@ function App() {
                     />
                   </label>
                   <label>
-                    Drawing / source reference
+                    {ot('Drawing / source reference')}
                     <input maxLength="240" value={takeoffItemDraft.sourceReference} onChange={(event) => setTakeoffItemDraft({ ...takeoffItemDraft, sourceReference: event.target.value })} />
                   </label>
                 </div>
-                <div className="takeoff-preview" aria-label="Calculated measurement preview">
-                  <div><span>Quantity</span><strong>{takeoffPreviewQuantity || 0} {takeoffItemDraft.unit}</strong></div>
-                  <div><span>Extended cost</span><strong>{currency.format(takeoffPreviewCost)}</strong></div>
-                  <div><span>Extended sell</span><strong>{currency.format(takeoffPreviewSell)}</strong></div>
+                <div className="takeoff-preview" aria-label={ot('Calculated measurement preview')}>
+                  <div><span>{ot('Quantity')}</span><strong>{takeoffPreviewQuantity || 0} {takeoffItemDraft.unit}</strong></div>
+                  <div><span>{ot('Extended cost')}</span><strong>{currency.format(takeoffPreviewCost)}</strong></div>
+                  <div><span>{ot('Extended sell')}</span><strong>{currency.format(takeoffPreviewSell)}</strong></div>
                 </div>
-                <p className="workflow-note">The ledger recalculates quantity, cost, and sell totals. Browser preview values are not authoritative.</p>
+                <p className="workflow-note">{ot('The ledger recalculates quantity, cost, and sell totals. Browser preview values are not authoritative.')}</p>
               </div>
               <div className="modal-actions">
-                <button type="button" className="secondary-button" onClick={closeTakeoffDialog}>Cancel</button>
+                <button type="button" className="secondary-button" onClick={closeTakeoffDialog}>{ot('Cancel')}</button>
                 <button className="primary-button" disabled={submitting || !takeoffItemDraftReady}>
                   <Ruler size={16} />
-                  {submitting ? 'Saving...' : takeoffDialog.mode === 'edit_item' ? 'Recalculate measurement' : 'Retain measurement'}
+                  {submitting ? ot('Saving...') : takeoffDialog.mode === 'edit_item' ? ot('Recalculate measurement') : ot('Retain measurement')}
                 </button>
               </div>
             </form>
@@ -16499,20 +16516,20 @@ function App() {
           >
             <div className="modal-heading">
               <div>
-                <p className="eyebrow">Draft correction</p>
-                <h2 id="takeoff-remove-title">Remove measurement?</h2>
+                <p className="eyebrow">{ot('Draft correction')}</p>
+                <h2 id="takeoff-remove-title">{ot('Remove measurement?')}</h2>
                 <p>{takeoffDialog.item.description}</p>
               </div>
-              <button type="button" className="icon-button" aria-label="Close measurement removal" onClick={closeTakeoffDialog}><X size={18} /></button>
+              <button type="button" className="icon-button" aria-label={ot('Close measurement removal')} onClick={closeTakeoffDialog}><X size={18} /></button>
             </div>
             <div className="takeoff-modal-body">
-              <p className="workflow-note">The draft sheet will be recalculated. This does not affect any converted estimate.</p>
+              <p className="workflow-note">{ot('The draft sheet will be recalculated. This does not affect any converted estimate.')}</p>
             </div>
             <div className="modal-actions">
-              <button type="button" className="secondary-button" onClick={closeTakeoffDialog}>Cancel</button>
+              <button type="button" className="secondary-button" onClick={closeTakeoffDialog}>{ot('Cancel')}</button>
               <button type="button" className="danger-button" disabled={submitting} onClick={removeTakeoffItem}>
                 <X size={16} />
-                {submitting ? 'Removing...' : 'Remove measurement'}
+                {submitting ? ot('Removing...') : ot('Remove measurement')}
               </button>
             </div>
           </section>
@@ -16533,44 +16550,44 @@ function App() {
           >
             <div className="modal-heading">
               <div>
-                <p className="eyebrow">Immutable estimate basis</p>
-                <h2 id="takeoff-convert-title">Prepare estimate</h2>
+                <p className="eyebrow">{ot('Immutable estimate basis')}</p>
+                <h2 id="takeoff-convert-title">{ot('Prepare estimate')}</h2>
                 <p>{takeoffDialog.takeoff.title}</p>
               </div>
-              <button type="button" className="icon-button" aria-label="Close estimate preparation" onClick={closeTakeoffDialog}><X size={18} /></button>
+              <button type="button" className="icon-button" aria-label={ot('Close estimate preparation')} onClick={closeTakeoffDialog}><X size={18} /></button>
             </div>
             <form onSubmit={convertTakeoff}>
               <div className="takeoff-modal-body">
                 <div className="commercial-draft-pricing" data-testid="takeoff-conversion-pricing-basis">
                   <GitBranch size={16} />
                   <div>
-                    <strong>{formatStatus(selectedJob?.pricingBasis?.currentDecision?.selectedModel || 'review')}</strong>
-                    <span>Decision v{selectedJob?.pricingBasis?.currentDecision?.versionNumber || '-'} / {selectedJob?.pricingBasis?.currentDecision?.score || 0}% fixed-price readiness / source current</span>
+                    <strong>{ot(formatStatus(selectedJob?.pricingBasis?.currentDecision?.selectedModel || 'review'))}</strong>
+                    <span>{ot('Decision v{version} / {score}% fixed-price readiness / source current', { version: selectedJob?.pricingBasis?.currentDecision?.versionNumber || '-', score: selectedJob?.pricingBasis?.currentDecision?.score || 0 })}</span>
                   </div>
                 </div>
                 <div className="takeoff-preview takeoff-convert-preview">
-                  <div><span>Work packages</span><strong>{takeoffDialog.takeoff.workBreakdown?.packageCount || 0}</strong></div>
-                  <div><span>Measurements</span><strong>{takeoffDialog.takeoff.itemCount}</strong></div>
-                  <div><span>Cost</span><strong>{currency.format(takeoffDialog.takeoff.totalCost || 0)}</strong></div>
-                  <div><span>Estimate net</span><strong>{currency.format(takeoffDialog.takeoff.subtotal || 0)}</strong></div>
+                  <div><span>{ot('Work packages')}</span><strong>{takeoffDialog.takeoff.workBreakdown?.packageCount || 0}</strong></div>
+                  <div><span>{ot('Measurements')}</span><strong>{takeoffDialog.takeoff.itemCount}</strong></div>
+                  <div><span>{ot('Cost')}</span><strong>{currency.format(takeoffDialog.takeoff.totalCost || 0)}</strong></div>
+                  <div><span>{ot('Estimate net')}</span><strong>{currency.format(takeoffDialog.takeoff.subtotal || 0)}</strong></div>
                 </div>
                 <div className="form-grid">
                   <label>
-                    Valid until
+                    {ot('Valid until')}
                     <input autoFocus required type="date" min={new Date().toISOString().slice(0, 10)} value={takeoffConversionDraft.validUntil} onChange={(event) => setTakeoffConversionDraft({ ...takeoffConversionDraft, validUntil: event.target.value })} />
                   </label>
                   <label className="form-span">
-                    Estimate notes
-                    <textarea maxLength="4000" value={takeoffConversionDraft.notes} onChange={(event) => setTakeoffConversionDraft({ ...takeoffConversionDraft, notes: event.target.value })} placeholder="Add reviewer context, exclusions, or estimate assumptions." />
+                    {ot('Estimate notes')}
+                    <textarea maxLength="4000" value={takeoffConversionDraft.notes} onChange={(event) => setTakeoffConversionDraft({ ...takeoffConversionDraft, notes: event.target.value })} placeholder={ot('Add reviewer context, exclusions, or estimate assumptions.')} />
                   </label>
                 </div>
-                <p className="workflow-note">Conversion seals the WBS, measurements, and package rollups with a SHA-256 snapshot and makes them read-only. It creates an internal quote approval only.</p>
+                <p className="workflow-note">{ot('Conversion seals the WBS, measurements, and package rollups with a SHA-256 snapshot and makes them read-only. It creates an internal quote approval only.')}</p>
               </div>
               <div className="modal-actions">
-                <button type="button" className="secondary-button" onClick={closeTakeoffDialog}>Cancel</button>
+                <button type="button" className="secondary-button" onClick={closeTakeoffDialog}>{ot('Cancel')}</button>
                 <button className="primary-button" disabled={submitting || !takeoffConversionDraft.validUntil}>
                   <ShieldCheck size={16} />
-                  {submitting ? 'Preparing...' : 'Seal and prepare estimate'}
+                  {submitting ? ot('Preparing...') : ot('Seal and prepare estimate')}
                 </button>
               </div>
             </form>

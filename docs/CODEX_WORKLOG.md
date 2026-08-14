@@ -1,5 +1,18 @@
 # Codex Worklog
 
+- Localized the complete WBS/quantity-takeoff, labour-burden, overhead-recovery,
+  estimating-rate policy, and unit-rate build-up surface in Dutch and English,
+  including create, edit, remove, conversion, and policy dialogs. Operator-entered
+  policy names, labour classes, work packages, descriptions, notes, and source
+  references remain unchanged when the display language changes.
+- Kept the expanded 903-key operator catalog out of the English startup path by
+  loading it only when Dutch is active. The rejected eager implementation grew the
+  main chunk to 582.29 kB; the corrected build is 531.51 kB and passes the bundle
+  budget at 397,789 total gzip bytes.
+- Extended the existing browser takeoff journey to prove Dutch rendering after a
+  complete governed estimate conversion while preserving retained English project
+  evidence. Focused and complete browser gates pass, including all 90 workflows in
+  23 isolated batches.
 - Added bounded tab-scoped draft recovery across central operator, field, and
   client-portal forms. Drafts are principal-scoped, expire after 12 hours, exclude
   secret-shaped fields/files, enforce per-entry/total limits, clear on sign-out,
