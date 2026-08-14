@@ -98,6 +98,7 @@ test('billing milestones remain contract-bounded and bind exact values to one in
   assert.equal(financeJob.money.plannedBillingValue, 1000);
   assert.equal(financeJob.money.dueBillingValue, 1000);
   assert.equal(draftAction.billingMilestoneId, milestone.id);
+  assert.equal(draftAction.billingMilestoneSequence, milestone.sequenceNumber);
   assert.equal(draftAction.amount, 1000);
   assert.equal(draftAction.taxRate, 21);
 

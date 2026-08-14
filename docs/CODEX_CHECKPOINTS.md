@@ -3,6 +3,20 @@
 This file is a compact resume boundary. A future implementation pass should verify
 the repository rather than treating these statements as current by assumption.
 
+## CP-21 Bilingual job costing and cost-to-complete
+
+- Finance readiness now localizes controlled metrics, statuses, actions, cost-code
+  tables, source-review warnings, history, policy text, and accessible names while
+  retaining budget descriptions, time notes, vendors, and receipt evidence verbatim.
+- Warning counts and billing milestone sequence are structured ledger fields; the
+  UI no longer derives these presentations from English message text.
+- Accessibility: the horizontally scrollable forecast table is keyboard focusable,
+  its focus state is visible, and compact summary text passes the Dutch axe scan.
+- Verification: 2,843 unique specialist translation keys with zero duplicates;
+  10 frontend tests, 534 Node tests, 96 Chromium workflows in 24 isolated batches,
+  release/HAI/lint/build/bundle, production benchmark, hardened container, and
+  Node 22.23.2 Windows standalone gates pass.
+
 ## CP-20 Bilingual field assurance and risk control
 
 - Locale wiring: persisted operator locale reaches the field page, assurance queue,

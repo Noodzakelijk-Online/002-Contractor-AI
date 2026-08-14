@@ -1449,9 +1449,10 @@
 .cost-forecast-detail { min-width: 0; margin-top: 12px; border-top: 1px solid #dfe7e3; border-bottom: 1px solid #dfe7e3; }
 .cost-forecast-detail summary { display: flex; min-height: 38px; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 2px; color: #2d493f; cursor: pointer; }
 .cost-forecast-detail summary span { font-size: 11px; font-weight: 800; }
-.cost-forecast-detail summary small { overflow-wrap: anywhere; color: #6a7b74; font-size: 9px; text-align: right; }
+.cost-forecast-detail summary small { overflow-wrap: anywhere; color: #4f625a; font-size: 9px; text-align: right; }
 .cost-forecast-detail[open] summary { border-bottom: 1px solid #e3eae7; }
 .cost-forecast-table-wrap { width: 100%; max-width: 100%; overflow-x: auto; overscroll-behavior-inline: contain; }
+.cost-forecast-table-wrap:focus-visible { outline: 2px solid #18724f; outline-offset: 2px; }
 .cost-forecast-table { width: 100%; min-width: 760px; border-collapse: collapse; font-size: 10px; font-variant-numeric: tabular-nums; }
 .cost-forecast-table th, .cost-forecast-table td { padding: 8px 9px; border-bottom: 1px solid #e4ebe8; text-align: right; white-space: nowrap; }
 .cost-forecast-table thead th { color: #687a72; background: #f4f7f6; font-size: 9px; text-transform: uppercase; }

@@ -1,5 +1,24 @@
 # Codex Worklog
 
+## 2026-08-14 - Job costing and cost-to-complete bilingual pass
+
+- Localized finance readiness across job metrics, status, primary actions, risk
+  chips, cost-code details, forecast warnings, retained forecast history, policy,
+  action buttons, download names, notices, errors, and empty states.
+- Added structured milestone sequence and warning count/amount/currency fields so
+  Dutch presentation does not parse or rewrite retained English evidence.
+- Added a retained-evidence browser workflow covering Dutch rendering, reload,
+  forecast freeze, API readback, axe, mobile containment, English round trip, and
+  empty console/page-error logs. It also found and fixed cost-table keyboard focus
+  and compact-summary contrast defects.
+- Current-source gates pass: 2,843 unique specialist translation keys, 10 frontend
+  tests, 534 Node tests (498 passed and 36 PostgreSQL/environment skips) in 72.4
+  seconds, all 96 Chromium workflows in 24 isolated batches in 461.5 seconds,
+  release/HAI/lint/build/bundle at 442,076 total gzip bytes, production benchmark,
+  hardened container, and Node 22.23.2 Windows standalone verification.
+- In-app Browser navigation to the isolated local runtime was blocked by Browser
+  URL policy; the repository production-browser harness passed the same built flow.
+
 ## 2026-08-14 - Field assurance and incident bilingual pass
 
 - Passed the retained operator locale through the Field workspace, field-assurance

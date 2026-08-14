@@ -2602,8 +2602,8 @@ test('finance workspace freezes, approves, and invalidates a source-linked cost 
   await row.getByText('Cost-code review', { exact: true }).click();
   await expect(row.getByRole('columnheader', { name: 'EAC' })).toBeVisible();
   await expect(row.getByRole('rowheader', { name: /BROWSER-FC-100/ })).toBeVisible();
-  await expect(row).toContainText(/time log\(s\) remain unreviewed/i);
-  await expect(row).toContainText(/expense record\(s\) are included in EAC/i);
+  await expect(row).toContainText(/1 time log remains unreviewed/i);
+  await expect(row).toContainText(/1 expense record is included in EAC/i);
   await expect(row.getByRole('button', { name: `Freeze cost forecast for ${intake.job.title}` })).toBeVisible();
   await row.getByRole('button', { name: `Freeze cost forecast for ${intake.job.title}` }).click();
   await expect(page.getByText(/Cost forecast FC-\d{4}-\d{6} retained from the current cost-code evidence/)).toBeVisible();

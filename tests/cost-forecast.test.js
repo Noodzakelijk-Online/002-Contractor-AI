@@ -237,6 +237,7 @@ test('mixed currencies and missing approved budgets block a forecast snapshot', 
   forecast = ledger.calculateCostForecast(job.id);
   assert.equal(forecast.ready, false);
   assert.ok(forecast.blockers.some(blocker => blocker.code === 'cost_forecast_currency_mismatch'));
+  assert.equal(forecast.warnings.find(warning => warning.code === 'unbudgeted_costs_present')?.count, 1);
   assert.throws(
     () => ledger.requestCostForecastSnapshot(job.id),
     error => error.code === 'cost_forecast_not_ready' && error.statusCode === 409

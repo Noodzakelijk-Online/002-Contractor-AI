@@ -17,7 +17,7 @@ or operations APIs and expose explicit loading, disabled, empty, and error state
 | Planning | schedule, capacity, assignments, constraints, commitments | Wired and persisted |
 | Field | assigned work, attendance, daily evidence, safety and quality | Wired; mobile/offline states covered |
 | Procurement | bidder/partner, commitment, receiving, equipment | Wired with compliance/approval gates |
-| Finance | forecasts, billing, invoice/credit/payable evidence | Wired; no transfer or ledger posting claim |
+| Finance | job costing, cost-to-complete, forecasts, billing, invoice/credit/payable evidence | Wired and bilingual for the practical-core cost review; no transfer or ledger posting claim |
 | Performance | scorecard and governed framework search, method basis, scope, evidence, measures, review and history | Wired and persisted; starters never fabricate evidence and make no method certification claim |
 | Approvals | inspect source, approve/reject, follow resulting action | Wired; source changes fail closed |
 | Operations | identity, readiness, audit, backup/export/archive/restore | Wired; owner safety, support, and previewed QA-maintenance controls added |
@@ -52,7 +52,11 @@ or operations APIs and expose explicit loading, disabled, empty, and error state
 - Field assurance, NCR, and observation/incident controls now share the retained
   operator locale, preserve operator evidence verbatim, expose localized governed
   actions, and remain contained on narrow field-worker screens.
-- The responsive production UI is exercised by 95 isolated Chromium tests across
+- Finance readiness now presents cost-code budgets, approved/unreviewed actuals,
+  commitments, CTC/EAC/VAC, source warnings, forecasts, and approval-gated actions
+  in Dutch or English without rewriting retained cost evidence. Its scrollable table
+  is keyboard focusable and axe-clean at desktop and mobile widths.
+- The responsive production UI is exercised by 96 isolated Chromium tests across
   desktop, mobile, owner, field-worker, office, approver, and client-portal flows.
 - The framework catalog renders 25 bounded rows per page with search, family and
   status filters; create, activation, history, and mobile containment are exercised

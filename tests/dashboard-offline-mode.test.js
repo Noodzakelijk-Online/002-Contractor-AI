@@ -20,6 +20,7 @@ const dashboardSource = [
 const clientPortalSource = fs.readFileSync(path.join(__dirname, '..', 'ClientPortal.jsx'), 'utf8');
 const outboxSource = fs.readFileSync(path.join(__dirname, '..', 'field-outbox.js'), 'utf8');
 const localeSource = fs.readFileSync(path.join(__dirname, '..', 'locale.js'), 'utf8');
+const ledgerSource = fs.readFileSync(path.join(__dirname, '..', 'operating-ledger.js'), 'utf8');
 
 test('React dashboard uses ledger endpoints instead of cached or simulated contractor records', () => {
   assert.match(dashboardSource, /api\('\/api\/ledger\/dashboard'\)/);
@@ -148,6 +149,10 @@ test('finance dashboard completes standalone purchase orders through approved im
 });
 
 test('finance dashboard freezes server-derived cost forecasts through approval-backed snapshots', () => {
+  assert.match(dashboardSource, /function localizedFinanceActionLabel/);
+  assert.match(dashboardSource, /function localizedCostForecastWarning/);
+  assert.match(dashboardSource, /<FinanceWorkspace[\s\S]*text=\{ot\}/);
+  assert.match(dashboardSource, /className="cost-forecast-table-wrap"[\s\S]*tabIndex=\{0\}/);
   assert.match(dashboardSource, /prepare_cost_forecast/);
   assert.match(dashboardSource, /\/cost-forecast\/snapshots`/);
   assert.match(dashboardSource, /Forecast cost/);
@@ -164,6 +169,9 @@ test('finance dashboard freezes server-derived cost forecasts through approval-b
   assert.match(dashboardSource, /costForecast\.snapshotCurrent/);
   assert.match(dashboardSource, /awaiting approval/);
   assert.match(dashboardSource, /Cost forecast .* retained from the current cost-code evidence/);
+  assert.match(ledgerSource, /billingMilestoneSequence: nextBillingMilestone\?\.sequenceNumber \|\| null/);
+  assert.match(ledgerSource, /code: 'unbudgeted_costs_present'[\s\S]*count: summary\.unbudgetedCostCodes/);
+  assert.match(ledgerSource, /code: 'purchase_commitment_unreviewed'[\s\S]*amount: roundMoney\(unreviewedCommitment\)/);
 });
 
 test('finance dashboard operates an approval-backed 13-week cash-flow forecast', () => {

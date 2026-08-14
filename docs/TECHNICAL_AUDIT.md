@@ -113,6 +113,13 @@ external-provider engines.
     rejects submitted-first operational provenance, and NCR closure separately
     retains its named verifier plus a source-hashed authenticated verifier principal
     that cannot approve its own closure.
+17. Finance readiness exposed English-only job-costing and cost-to-complete evidence
+    in an otherwise bilingual practical core. Controlled metrics, statuses, actions,
+    cost-code tables, source-review warnings, history, policy text, and accessible
+    labels now follow the retained operator locale. Structured warning counts and
+    billing milestone sequence data remove presentation parsing, while operator-entered
+    budget, time, expense, and supplier evidence remains verbatim. The scrollable
+    cost table is keyboard focusable and compact summary contrast now passes axe.
 
 ### Residual technical debt
 
@@ -128,9 +135,10 @@ external-provider engines.
 5. Per-principal operator language and token-scoped client-portal language are
    retained in the ledger. The shell, client portal, Performance Scorecard, and
    Framework Register are bilingual and formatting follows the selected locale.
-   Job setup coverage, critical-path work planning, NCR, field risk, and field
-   assurance controls are also bilingual, but the remaining specialist operator
-   workspace copy is not yet fully translated.
+   Job setup coverage, critical-path work planning, NCR, field risk, field
+   assurance, job-costing, cost-code review, cost-to-complete, and finance-readiness
+   controls are also bilingual, but the remaining specialist operator workspace
+   copy is not yet fully translated.
 6. Legal retention periods and data-subject erasure decisions remain operator and
    counsel responsibilities. The application archives and exports; it does not
    silently delete immutable commercial or audit evidence.

@@ -33593,7 +33593,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     });
     if (summary.unbudgetedCostCodes) warnings.push({
       code: 'unbudgeted_costs_present',
-      message: `${summary.unbudgetedCostCodes} cost code(s) contain actual or committed cost without an approved budget.`
+      message: `${summary.unbudgetedCostCodes} cost code(s) contain actual or committed cost without an approved budget.`,
+      count: summary.unbudgetedCostCodes
     });
     if (unreviewedTimeLogIds.length) warnings.push({
       code: 'labor_awaiting_timesheet_approval',
@@ -33613,6 +33614,8 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     if (unreviewedCommitment > 0.01) warnings.push({
       code: 'purchase_commitment_unreviewed',
       message: `${unreviewedCommitment.toFixed(2)} ${currency} of retained purchase-order exposure is included in EAC but is not recognized as an approved commitment.`,
+      amount: roundMoney(unreviewedCommitment),
+      currency,
       purchaseOrderIds: invalidPurchaseOrderIds
     });
     const policy = {
@@ -52626,6 +52629,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
           type: 'draft_invoice',
           label: nextBillingMilestone ? `Draft milestone ${nextBillingMilestone.sequenceNumber} invoice` : 'Draft approval-gated invoice',
           billingMilestoneId: nextBillingMilestone?.id || null,
+          billingMilestoneSequence: nextBillingMilestone?.sequenceNumber || null,
           amount: nextBillingMilestone?.amount || invoiceDraftAmount,
           taxRate: nextBillingMilestone?.taxRate ?? null,
           dueAt: nextBillingMilestone?.dueAt || null,
