@@ -49,8 +49,15 @@ test('office operator signs in through an HTTP-only role session and signs out c
   await expect(page.getByRole('heading', { name: 'Vandaag' })).toBeVisible();
   await expect(page.locator('.operator-session')).toContainText('office operator');
 
+  await page.getByRole('button', { name: 'Prestaties', exact: true }).click();
+  await expect(page.getByTestId('performance-scorecard').getByRole('heading', { name: 'Aannemersscorekaart' })).toBeVisible();
+  await expect(page.getByTestId('framework-workspace').getByRole('heading', { name: 'Register met werkkaders' })).toBeVisible();
+  await expect(page.getByPlaceholder('Zoek werkkaders of families')).toBeVisible();
+
   await page.getByLabel('Taal').selectOption('en-GB');
-  await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible();
+  await expect(page.getByTestId('performance-scorecard').getByRole('heading', { name: 'Contractor Balanced Scorecard' })).toBeVisible();
+  await expect(page.getByTestId('framework-workspace').getByRole('heading', { name: 'Operating framework register' })).toBeVisible();
+  await expect(page.getByPlaceholder('Search frameworks or families')).toBeVisible();
   expect(await page.locator('html').getAttribute('lang')).toBe('en');
 
   await page.getByRole('button', { name: 'Sign out' }).click();

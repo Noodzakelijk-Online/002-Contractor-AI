@@ -2688,6 +2688,15 @@ test('owner investigates cursor-paged audit history with retained chain proof', 
   await page.getByRole('button', { name: 'Operations', exact: true }).click();
   const panel = page.getByTestId('audit-history-panel');
   await expect(panel).toBeVisible();
+  const toolbarGeometry = await panel.getByTestId('audit-history-filters').evaluate(element => ({
+    viewportWidth: document.documentElement.clientWidth,
+    pageWidth: document.documentElement.scrollWidth,
+    right: element.getBoundingClientRect().right,
+    actionsRight: element.querySelector('.audit-filter-actions')?.getBoundingClientRect().right || 0
+  }));
+  expect(toolbarGeometry.pageWidth).toBeLessThanOrEqual(toolbarGeometry.viewportWidth);
+  expect(toolbarGeometry.right).toBeLessThanOrEqual(toolbarGeometry.viewportWidth);
+  expect(toolbarGeometry.actionsRight).toBeLessThanOrEqual(toolbarGeometry.viewportWidth);
   const rows = panel.locator('.audit-history-row');
   await expect(rows).toHaveCount(25);
   const initialRowCount = await rows.count();

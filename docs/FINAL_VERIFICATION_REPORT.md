@@ -20,12 +20,12 @@ decisions outside this repository.
 | Dependency audit | Passed | `npm audit --audit-level=low`: 0 vulnerabilities |
 | Release contract | Passed | `npm run verify:release`: 67 canonical paths, 12 retired paths, 16 hosted keys, 328 canonical source files; generated release/runtime/artifact directories excluded |
 | HAI input contract | Passed | Native verifier produced the checksummed `accountfeed.GenericItem` review-only fixture with `canExecute=false`; a live HAI parser/account-feed sync was not configured for this run |
-| Frontend tests | Passed | Vitest 4.1.10 with Testing Library: 3 files, 9 locale/component tests, 0 failed |
-| Node tests | Passed | Node 22.23.2 isolated suite: 533 tests, 497 passed, 36 PostgreSQL/environment skips, 0 failed, 295.0 s |
-| Production build | Passed | `npm run build`: main application JS 530.71 kB and CSS 274.66 kB before gzip; locale data loads separately as 12.79 kB JS, client portal as 24.43 kB JS/10.19 kB CSS, and job workspace controls as 232.90 kB JS |
-| Bundle budget | Passed | `npm run verify:bundle`: largest JS 530,708 bytes, largest CSS 274,661 bytes, and 377,276 total gzip bytes across 38 assets; all budgets passed |
+| Frontend tests | Passed | Vitest 4.1.10 with Testing Library: 3 files, 10 locale/component tests, 0 failed |
+| Node tests | Passed | Node 22.23.2 isolated suite: 533 tests, 497 passed, 36 PostgreSQL/environment skips, 0 failed, 801.4 s on a heavily loaded workstation |
+| Production build | Passed | `npm run build`: main application JS 530.73 kB and CSS 274.66 kB before gzip; locale data loads separately as 20.05 kB JS, client portal as 24.43 kB JS/10.19 kB CSS, and job workspace controls as 232.90 kB JS |
+| Bundle budget | Passed | `npm run verify:bundle`: largest JS 530,728 bytes, largest CSS 274,661 bytes, and 380,510 total gzip bytes across 38 assets; all budgets passed |
 | Production-scale ledger | Passed | Deterministic 55,000-row production profile: seed 1,973.43 ms; startup 885.07 ms; reopen 8.36 ms; dashboard p95 553.77 ms; intake p95 63.03 ms; audit verification 253.84 ms; all correctness, resource, response-size, and latency thresholds passed |
-| Browser tests | Passed | All 90 Playwright Chromium workflows passed on current source in 23 bounded isolated batches in 637.1 s |
+| Browser tests | Passed | All 90 Playwright Chromium workflows passed on current source in 23 bounded isolated batches in 673.5 s |
 | Accessibility gate | Passed | Pinned `@axe-core/playwright` 4.12.1 scanned production sign-in, all twelve owner workspaces, representative dialogs, mobile navigation, and mobile/desktop client portal surfaces with zero selected WCAG A/AA violations and no rule or component exclusions |
 | Container runtime | Passed | `npm run test:container`: non-root, read-only, loopback, authentication, SQLite volume persistence, restart persistence, graceful shutdown and migration 072 smoke |
 | Local runtime | Passed | Node and browser gates each served the current production build from isolated local runtimes; public readiness, authenticated session, persistence, and graceful shutdown probes passed |
@@ -49,9 +49,9 @@ decisions outside this repository.
 | Audit actor integrity | Passed for authenticated role principals, scoped client portal identity, and local `local:owner`; all explicit mutation sites plus 65 former workflow-label fallbacks consume the trusted principal directly. Approval and authoritative operational provenance preserve that principal through retained decisions, downstream releases, chained history, and separation-of-duty checks. NCR closure retains both named and authenticated verifier identities and rejects self-approval. The release contract rejects body-derived actors, fallback routes, and submitted-first approval or operational principals |
 | Work-permit timing integrity | Passed with creation, readiness, and approval expiry bound to the injected ledger clock; deterministic expiry tests retain fail-closed approval behavior without wall-clock sleeps |
 | Draft recovery | Passed for reload restoration, operator isolation, portal-token fingerprinting, expiry/size bounds, secret/file exclusion, logout and intentional-close cleanup, no implicit ledger write, and explicit job-workspace navigation |
-| In-app Browser QA | Passed against the current built runtime: persisted NL shell rendering, localized currency, compact navigation, no horizontal overflow, and a clean inspected error/warning log; the full portal language workflow passed in Playwright |
+| In-app Browser QA | Passed against the current built runtime: persisted NL shell rendering, localized currency, compact navigation, no horizontal overflow, and a clean inspected error/warning log; the complete portal language flow and persisted bilingual Performance Scorecard/Framework Register flow passed in Playwright |
 | In-app Browser draft QA | Passed against the current built runtime: an unfinished opportunity restored exact values after reload, an intentional close cleared it, and no visible error state remained |
-| Responsive evidence | Desktop and narrow-screen QA-maintenance geometry was inspected in the in-app browser; 90 automated workflows retain repeatable desktop/mobile interaction evidence |
+| Responsive evidence | Desktop and narrow-screen QA-maintenance geometry was inspected in the in-app browser; the audit toolbar now uses shell-aware breakpoints with explicit viewport containment assertions, and 90 automated workflows retain repeatable desktop/mobile interaction evidence |
 
 ## Confirmed limitations
 
@@ -60,10 +60,10 @@ decisions outside this repository.
 - EU hosted production remains blocked until an operator supplies and verifies the
   provider, region, DPA, ingress, database, object storage, backup, retention, and
   recovery requirements described in `EU_HOSTING.md`.
-- The operator shell and complete client portal now have persisted NL/EN controls
-  with locale-aware dates, numbers, and currency. Full translation of every
-  specialist operator workspace, universal component-internal draft recovery, and
-  uniform pagination remain partial.
+- The operator shell, complete client portal, Performance Scorecard, and Framework
+  Register now have persisted NL/EN controls with locale-aware dates, numbers, and
+  currency. Translation of the remaining specialist operator workspaces, universal
+  component-internal draft recovery, and uniform pagination remain partial.
 - The ngrok launcher and fail-closed tests are complete, but no live tunnel was
   opened because no `NGROK_AUTHTOKEN` was available.
 - The HAI connector is read-only, exportable, and accepted by the maintained HAI

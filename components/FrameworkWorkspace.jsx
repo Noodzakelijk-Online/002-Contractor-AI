@@ -15,6 +15,7 @@ import {
   X,
 } from 'lucide-react'
 import { formatDateTime, formatStatus } from '../dashboard-format'
+import { operatorText } from '../locale'
 import './FrameworkWorkspace.css'
 
 const EMPTY_LIST = Object.freeze([])
@@ -64,10 +65,10 @@ function futureDate(days) {
   return `${year}-${month}-${day}`
 }
 
-function scopeLabel(value) {
-  if (value === 'organization') return 'Organization'
-  if (value === 'job') return 'Project'
-  return 'Organization or project'
+function scopeLabel(value, t) {
+  if (value === 'organization') return t('Organization')
+  if (value === 'job') return t('Project')
+  return t('Organization or project')
 }
 
 function draftFor(framework, implementation = null) {
@@ -99,7 +100,8 @@ function statusTone(status) {
   return 'blue'
 }
 
-export default function FrameworkWorkspace({ catalog, workspace, jobs, request, canCoordinate, onChange }) {
+export default function FrameworkWorkspace({ catalog, workspace, jobs, request, canCoordinate, onChange, locale = 'en-GB' }) {
+  const t = (key, variables) => operatorText(locale, key, variables)
   const [query, setQuery] = useState('')
   const [familyId, setFamilyId] = useState('all')
   const [status, setStatus] = useState('all')
@@ -194,7 +196,7 @@ export default function FrameworkWorkspace({ catalog, workspace, jobs, request, 
       const result = await request(`/api/ledger/frameworks/${encodeURIComponent(editor.id)}/revisions?limit=100`)
       setHistory(result.revisions || [])
     } catch (nextError) {
-      setError(nextError.message || 'Revision history could not be loaded.')
+      setError(nextError.message || t('Revision history could not be loaded.'))
     } finally {
       setHistoryBusy(false)
     }
@@ -230,9 +232,13 @@ export default function FrameworkWorkspace({ catalog, workspace, jobs, request, 
       )
       onChange(result.workspace)
       setEditor(null)
-      setNotice(result.replayed ? 'The retained revision was already current.' : `${payload.frameworkId ? editor.frameworkName : 'Framework'} retained.`)
+      setNotice(result.replayed
+        ? t('The retained revision was already current.')
+        : payload.frameworkId
+          ? t('{name} retained.', { name: editor.frameworkName })
+          : t('Framework retained.'))
     } catch (nextError) {
-      setError(nextError.message || 'The framework review could not be retained.')
+      setError(nextError.message || t('The framework review could not be retained.'))
     } finally {
       setBusy(false)
     }
@@ -250,55 +256,55 @@ export default function FrameworkWorkspace({ catalog, workspace, jobs, request, 
   }
 
   if (!catalog || !workspace) {
-    return <div className="framework-loading" role="status">Preparing the operating framework register</div>
+    return <div className="framework-loading" role="status">{t('Preparing the operating framework register')}</div>
   }
 
   return (
     <section className="framework-workspace" data-testid="framework-workspace" aria-busy={busy || undefined}>
       <header className="framework-heading">
         <div>
-          <span className="eyebrow">Management system</span>
-          <h2>Operating framework register</h2>
-          <p>{catalog.counts.frameworks} frameworks across {catalog.counts.families} operating families</p>
+          <span className="eyebrow">{t('Management system')}</span>
+          <h2>{t('Operating framework register')}</h2>
+          <p>{t('{frameworks} frameworks across {families} operating families', { frameworks: catalog.counts.frameworks, families: catalog.counts.families })}</p>
         </div>
         {workspace.dueReviews?.length ? (
-          <span className="framework-due"><Clock3 size={15} />{workspace.dueReviews.length} review{workspace.dueReviews.length === 1 ? '' : 's'} due</span>
+          <span className="framework-due"><Clock3 size={15} />{t(workspace.dueReviews.length === 1 ? '{count} review due' : '{count} reviews due', { count: workspace.dueReviews.length })}</span>
         ) : null}
       </header>
 
       {error && !editor ? <div className="framework-banner framework-banner-error" role="alert"><TriangleAlert size={16} /><span>{error}</span></div> : null}
       {notice ? <div className="framework-banner framework-banner-notice" role="status"><Check size={16} /><span>{notice}</span></div> : null}
 
-      <div className="framework-summary" aria-label="Framework register summary">
-        <div><BookOpenCheck size={18} /><span>Catalog</span><strong>{summary.catalogFrameworks || catalog.counts.frameworks}</strong></div>
-        <div><Target size={18} /><span>Active</span><strong>{summary.statuses?.active || 0}</strong></div>
-        <div><CalendarClock size={18} /><span>Reviews due</span><strong>{summary.dueReviews || 0}</strong></div>
-        <div><History size={18} /><span>Families covered</span><strong>{summary.coveredFamilies || 0}/{summary.catalogFamilies || catalog.counts.families}</strong></div>
+      <div className="framework-summary" aria-label={t('Framework register summary')}>
+        <div><BookOpenCheck size={18} /><span>{t('Catalog')}</span><strong>{summary.catalogFrameworks || catalog.counts.frameworks}</strong></div>
+        <div><Target size={18} /><span>{t('Active')}</span><strong>{summary.statuses?.active || 0}</strong></div>
+        <div><CalendarClock size={18} /><span>{t('Reviews due')}</span><strong>{summary.dueReviews || 0}</strong></div>
+        <div><History size={18} /><span>{t('Families covered')}</span><strong>{summary.coveredFamilies || 0}/{summary.catalogFamilies || catalog.counts.families}</strong></div>
       </div>
 
       <div className="framework-toolbar">
         <label className="framework-search">
-          <span className="sr-only">Search frameworks</span>
+          <span className="sr-only">{t('Search frameworks')}</span>
           <Search size={16} aria-hidden="true" />
-          <input value={query} onChange={event => setQuery(event.target.value)} placeholder="Search frameworks or families" />
+          <input value={query} onChange={event => setQuery(event.target.value)} placeholder={t('Search frameworks or families')} />
         </label>
         <label>
-          <span className="sr-only">Framework family</span>
+          <span className="sr-only">{t('Framework family')}</span>
           <select value={familyId} onChange={event => setFamilyId(event.target.value)}>
-            <option value="all">All families</option>
+            <option value="all">{t('All families')}</option>
             {families.map(family => <option value={family.id} key={family.id}>{family.number}. {family.name}</option>)}
           </select>
         </label>
-        <div className="framework-status-filter" role="group" aria-label="Implementation status">
+        <div className="framework-status-filter" role="group" aria-label={t('Implementation status')}>
           {['all', 'draft', 'active', 'paused', 'retired'].map(value => (
-            <button key={value} type="button" aria-pressed={status === value} onClick={() => setStatus(value)}>{formatStatus(value)}</button>
+            <button key={value} type="button" aria-pressed={status === value} onClick={() => setStatus(value)}>{t(formatStatus(value))}</button>
           ))}
         </div>
       </div>
 
       <div className="framework-table-scroll">
         <table className="framework-table">
-          <thead><tr><th>Framework</th><th>Family</th><th>Register</th><th aria-label="Actions" /></tr></thead>
+          <thead><tr><th>{t('Framework')}</th><th>{t('Family')}</th><th>{t('Register')}</th><th aria-label={t('Actions')} /></tr></thead>
           <tbody>
             {visibleFrameworks.map(framework => {
               const retained = implementationsByFramework.get(framework.id) || EMPTY_LIST
@@ -308,15 +314,15 @@ export default function FrameworkWorkspace({ catalog, workspace, jobs, request, 
                   <td><div className="framework-family-list">{framework.families.map(family => <span key={family.id}>{family.number}. {family.name}</span>)}</div></td>
                   <td>
                     {retained.length ? retained.map(item => (
-                      <button className="framework-record" type="button" onClick={() => openEdit(item)} key={item.id} title={`${canCoordinate ? 'Edit' : 'View'} ${framework.name}`}>
-                        <span className={`framework-status framework-status-${statusTone(item.status)}`}>{formatStatus(item.status)}</span>
-                        <span>{item.scopeType === 'organization' ? 'Organization' : jobs.find(job => job.id === item.scopeId)?.title || 'Project'}</span>
+                      <button className="framework-record" type="button" onClick={() => openEdit(item)} key={item.id} title={t(canCoordinate ? 'Edit {name}' : 'View {name}', { name: framework.name })}>
+                        <span className={`framework-status framework-status-${statusTone(item.status)}`}>{t(formatStatus(item.status))}</span>
+                        <span>{item.scopeType === 'organization' ? t('Organization') : jobs.find(job => job.id === item.scopeId)?.title || t('Project')}</span>
                       </button>
-                    )) : <span className="framework-unset">Not retained</span>}
+                    )) : <span className="framework-unset">{t('Not retained')}</span>}
                   </td>
                   <td>
                     {canCoordinate ? (
-                      <button className="icon-button" type="button" title={`Start ${framework.name}`} aria-label={`Start ${framework.name}`} onClick={() => openCreate(framework)}>
+                      <button className="icon-button" type="button" title={t('Start {name}', { name: framework.name })} aria-label={t('Start {name}', { name: framework.name })} onClick={() => openCreate(framework)}>
                         <Plus size={16} />
                       </button>
                     ) : null}
@@ -328,14 +334,14 @@ export default function FrameworkWorkspace({ catalog, workspace, jobs, request, 
         </table>
       </div>
 
-      {!visibleFrameworks.length ? <div className="framework-empty">No frameworks match the current filters.</div> : null}
+      {!visibleFrameworks.length ? <div className="framework-empty">{t('No frameworks match the current filters.')}</div> : null}
 
       <div className="framework-pagination">
-        <span>{filteredFrameworks.length} result{filteredFrameworks.length === 1 ? '' : 's'}</span>
+        <span>{t(filteredFrameworks.length === 1 ? '{count} result' : '{count} results', { count: filteredFrameworks.length })}</span>
         <div>
-          <button className="icon-button" type="button" aria-label="Previous framework page" disabled={page === 0} onClick={() => setPage(current => Math.max(0, current - 1))}><ChevronLeft size={17} /></button>
-          <span>Page {page + 1} of {totalPages}</span>
-          <button className="icon-button" type="button" aria-label="Next framework page" disabled={page + 1 >= totalPages} onClick={() => setPage(current => Math.min(totalPages - 1, current + 1))}><ChevronRight size={17} /></button>
+          <button className="icon-button" type="button" aria-label={t('Previous framework page')} disabled={page === 0} onClick={() => setPage(current => Math.max(0, current - 1))}><ChevronLeft size={17} /></button>
+          <span>{t('Page {page} of {pages}', { page: page + 1, pages: totalPages })}</span>
+          <button className="icon-button" type="button" aria-label={t('Next framework page')} disabled={page + 1 >= totalPages} onClick={() => setPage(current => Math.min(totalPages - 1, current + 1))}><ChevronRight size={17} /></button>
         </div>
       </div>
 
@@ -343,8 +349,8 @@ export default function FrameworkWorkspace({ catalog, workspace, jobs, request, 
         <div className="modal-backdrop" role="presentation">
           <section className="modal framework-modal" role="dialog" aria-modal="true" aria-labelledby="framework-editor-title">
             <div className="modal-heading">
-              <div><span className="eyebrow">{editor.id ? `Revision ${editor.revision}${canCoordinate ? '' : ' - read only'}` : 'New review'}</span><h2 id="framework-editor-title">{editor.frameworkName}</h2></div>
-              <button className="icon-button" type="button" aria-label="Close framework review" onClick={() => setEditor(null)} disabled={busy}><X size={18} /></button>
+              <div><span className="eyebrow">{editor.id ? t(canCoordinate ? 'Revision {revision}' : 'Revision {revision} - read only', { revision: editor.revision }) : t('New review')}</span><h2 id="framework-editor-title">{editor.frameworkName}</h2></div>
+              <button className="icon-button" type="button" aria-label={t('Close framework review')} onClick={() => setEditor(null)} disabled={busy}><X size={18} /></button>
             </div>
             <form onSubmit={save}>
               <fieldset disabled={busy || !canCoordinate}>
@@ -352,89 +358,89 @@ export default function FrameworkWorkspace({ catalog, workspace, jobs, request, 
                   <section className="framework-playbook" aria-labelledby="framework-playbook-title">
                     <div className="framework-playbook-heading">
                       <div>
-                        <strong id="framework-playbook-title">Method basis</strong>
+                        <strong id="framework-playbook-title">{t('Method basis')}</strong>
                         <span>{editorPlaybook.families.map(family => family.name).join(' + ')}</span>
                       </div>
                       <button className="secondary-button" type="button" onClick={applyMethodStarter}>
-                        <CalendarClock size={16} />Use cadence and measures
+                        <CalendarClock size={16} />{t('Use cadence and measures')}
                       </button>
                     </div>
                     <div className="framework-playbook-meta">
-                      <span>Scope: {editorPlaybook.recommendedScopes.map(scopeLabel).join(' / ')}</span>
-                      <span>Review every {editorPlaybook.reviewCadenceDays} days</span>
+                      <span>{t('Scope: {scopes}', { scopes: editorPlaybook.recommendedScopes.map(scope => scopeLabel(scope, t)).join(' / ') })}</span>
+                      <span>{t('Review every {days} days', { days: editorPlaybook.reviewCadenceDays })}</span>
                     </div>
                     <div className="framework-playbook-grid">
-                      <div><strong>Review steps</strong><ol>{editorPlaybook.steps.map(item => <li key={item}>{item}</li>)}</ol></div>
-                      <div><strong>Evidence candidates</strong><ul>{editorPlaybook.evidenceSuggestions.map(item => <li key={item}>{item}</li>)}</ul></div>
-                      <div><strong>Measure candidates</strong><ul>{editorPlaybook.measureSuggestions.map(item => <li key={item}>{item}</li>)}</ul></div>
+                      <div><strong>{t('Review steps')}</strong><ol>{editorPlaybook.steps.map(item => <li key={item}>{item}</li>)}</ol></div>
+                      <div><strong>{t('Evidence candidates')}</strong><ul>{editorPlaybook.evidenceSuggestions.map(item => <li key={item}>{item}</li>)}</ul></div>
+                      <div><strong>{t('Measure candidates')}</strong><ul>{editorPlaybook.measureSuggestions.map(item => <li key={item}>{item}</li>)}</ul></div>
                     </div>
                     <div className="framework-playbook-safeguard">
                       <TriangleAlert size={16} aria-hidden="true" />
                       <span>{editorPlaybook.safeguards.join(' ')}</span>
                     </div>
-                    <small>Evidence candidates are prompts only and are never retained as proof automatically.</small>
+                    <small>{t('Evidence candidates are prompts only and are never retained as proof automatically.')}</small>
                   </section>
                 ) : null}
                 <div className="framework-form-grid">
-                  <label>Scope
+                  <label>{t('Scope')}
                     <select value={editor.scopeType} onChange={event => setEditor(current => ({ ...current, scopeType: event.target.value, scopeId: '' }))} disabled={Boolean(editor.id)}>
-                      <option value="organization">Organization</option><option value="job">Project</option>
+                      <option value="organization">{t('Organization')}</option><option value="job">{t('Project')}</option>
                     </select>
                   </label>
-                  <label>Project
+                  <label>{t('Project')}
                     <select value={editor.scopeId} onChange={event => setEditor(current => ({ ...current, scopeId: event.target.value }))} disabled={Boolean(editor.id) || editor.scopeType !== 'job'} required={editor.scopeType === 'job'}>
-                      <option value="">Select project</option>
+                      <option value="">{t('Select project')}</option>
                       {jobs.filter(job => !['archived', 'cancelled', 'canceled'].includes(job.status)).map(job => <option value={job.id} key={job.id}>{job.title}</option>)}
                     </select>
                   </label>
-                  <label>Status
+                  <label>{t('Status')}
                     <select value={editor.status} onChange={event => setEditor(current => ({ ...current, status: event.target.value }))}>
-                      {editorStatuses.map(value => <option value={value} key={value}>{formatStatus(value)}</option>)}
+                      {editorStatuses.map(value => <option value={value} key={value}>{t(formatStatus(value))}</option>)}
                     </select>
                   </label>
-                  <label>Review due
+                  <label>{t('Review due')}
                     <input type="date" value={editor.reviewDueAt} onChange={event => setEditor(current => ({ ...current, reviewDueAt: event.target.value }))} />
                   </label>
                 </div>
-                <label>Objective
+                <label>{t('Objective')}
                   <textarea minLength="8" maxLength="1000" required value={editor.objective} onChange={event => setEditor(current => ({ ...current, objective: event.target.value }))} />
                 </label>
-                <label>Owner
+                <label>{t('Owner')}
                   <input minLength="2" maxLength="120" required value={editor.ownerName} onChange={event => setEditor(current => ({ ...current, ownerName: event.target.value }))} />
                 </label>
                 <div className="framework-form-grid framework-form-grid-text">
-                  <label>Current state
+                  <label>{t('Current state')}
                     <textarea minLength={editor.status === 'active' ? 8 : 0} required={editor.status === 'active'} maxLength="4000" value={editor.currentState} onChange={event => setEditor(current => ({ ...current, currentState: event.target.value }))} />
                   </label>
-                  <label>Target state
+                  <label>{t('Target state')}
                     <textarea minLength={editor.status === 'active' ? 8 : 0} required={editor.status === 'active'} maxLength="4000" value={editor.targetState} onChange={event => setEditor(current => ({ ...current, targetState: event.target.value }))} />
                   </label>
                 </div>
-                <label>Decision
+                <label>{t('Decision')}
                   <textarea minLength={editor.status === 'active' ? 8 : 0} required={editor.status === 'active'} maxLength="4000" value={editor.decision} onChange={event => setEditor(current => ({ ...current, decision: event.target.value }))} />
                 </label>
                 <div className="framework-form-grid framework-form-grid-text">
-                  <label>Evidence references <small>One per line</small>
+                  <label>{t('Evidence references')} <small>{t('One per line')}</small>
                     <textarea value={editor.evidenceRefs} onChange={event => setEditor(current => ({ ...current, evidenceRefs: event.target.value }))} />
                   </label>
-                  <label>Success measures <small>One per line</small>
+                  <label>{t('Success measures')} <small>{t('One per line')}</small>
                     <textarea required={editor.status === 'active'} value={editor.successMeasures} onChange={event => setEditor(current => ({ ...current, successMeasures: event.target.value }))} />
                   </label>
                 </div>
-                <label>Revision reason
+                <label>{t('Revision reason')}
                   <textarea minLength="8" maxLength="500" required value={editor.reason} onChange={event => setEditor(current => ({ ...current, reason: event.target.value }))} />
                 </label>
               </fieldset>
               {error ? <div className="framework-banner framework-banner-error" role="alert"><TriangleAlert size={16} /><span>{error}</span></div> : null}
               {editor.id ? (
                 <div className="framework-history">
-                  <button className="secondary-button" type="button" disabled={historyBusy || busy} onClick={loadHistory}><History size={16} />{historyBusy ? 'Loading...' : 'Revision history'}</button>
-                  {history ? <ol>{history.map(item => <li key={item.id}><strong>Revision {item.revisionNumber}</strong><span>{formatDateTime(item.createdAt)} by {item.actor}</span><small>{item.reason}</small></li>)}</ol> : null}
+                  <button className="secondary-button" type="button" disabled={historyBusy || busy} onClick={loadHistory}><History size={16} />{t(historyBusy ? 'Loading...' : 'Revision history')}</button>
+                  {history ? <ol>{history.map(item => <li key={item.id}><strong>{t('Revision {revision}', { revision: item.revisionNumber })}</strong><span>{t('{date} by {actor}', { date: formatDateTime(item.createdAt), actor: item.actor })}</span><small>{item.reason}</small></li>)}</ol> : null}
                 </div>
               ) : null}
               <div className="modal-actions">
-                <button className="secondary-button" type="button" onClick={() => setEditor(null)} disabled={busy}>{canCoordinate ? 'Cancel' : 'Close'}</button>
-                {canCoordinate ? <button className="primary-button" type="submit" disabled={busy || editor.reason.trim().length < 8}><Pencil size={16} />{busy ? 'Retaining...' : 'Retain revision'}</button> : null}
+                <button className="secondary-button" type="button" onClick={() => setEditor(null)} disabled={busy}>{t(canCoordinate ? 'Cancel' : 'Close')}</button>
+                {canCoordinate ? <button className="primary-button" type="submit" disabled={busy || editor.reason.trim().length < 8}><Pencil size={16} />{t(busy ? 'Retaining...' : 'Retain revision')}</button> : null}
               </div>
             </form>
           </section>

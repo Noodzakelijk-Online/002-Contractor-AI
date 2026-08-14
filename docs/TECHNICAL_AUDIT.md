@@ -126,9 +126,9 @@ external-provider engines.
    queues remain intentionally narrower and explicit.
 4. Pagination and advanced filters are not uniform across all long-lived lists.
 5. Per-principal operator language and token-scoped client-portal language are
-   retained in the ledger. The shell and client portal are bilingual and formatting
-   follows the selected locale, but specialist operator workspace copy is not yet
-   fully translated.
+   retained in the ledger. The shell, client portal, Performance Scorecard, and
+   Framework Register are bilingual and formatting follows the selected locale,
+   but the remaining specialist operator workspace copy is not yet fully translated.
 6. Legal retention periods and data-subject erasure decisions remain operator and
    counsel responsibilities. The application archives and exports; it does not
    silently delete immutable commercial or audit evidence.

@@ -12,6 +12,7 @@ import {
   X,
 } from 'lucide-react'
 import { formatDate, formatNumber, formatStatus } from '../dashboard-format'
+import { operatorText } from '../locale'
 import './PerformanceScorecard.css'
 
 const EMPTY_LIST = Object.freeze([])
@@ -33,17 +34,17 @@ function targetEntryKey(metricKey) {
   return `scorecard-target-${metricKey}-${Date.now()}-${Math.random().toString(16).slice(2)}`
 }
 
-function metricValue(value, unit) {
-  if (value === null || value === undefined) return 'No data'
+function metricValue(value, unit, t) {
+  if (value === null || value === undefined) return t('No data')
   if (unit === 'percent') return `${formatNumber(value, { maximumFractionDigits: 1 })}%`
   return formatNumber(value, { maximumFractionDigits: 2 })
 }
 
-function statusLabel(status) {
-  if (status === 'no_data') return 'No data'
-  if (status === 'on_track') return 'On track'
-  if (status === 'off_track') return 'Off track'
-  return formatStatus(status)
+function statusLabel(status, t) {
+  if (status === 'no_data') return t('No data')
+  if (status === 'on_track') return t('On track')
+  if (status === 'off_track') return t('Off track')
+  return t(formatStatus(status))
 }
 
 function trendIcon(metric) {
@@ -52,9 +53,33 @@ function trendIcon(metric) {
   return <Minus size={15} aria-hidden="true" />
 }
 
-function evidenceSummary(metric) {
-  if (metric.availability === 'historical_state_not_retained') return 'Historical position unavailable'
-  return `${metric.sampleSize} source${metric.sampleSize === 1 ? '' : 's'}`
+function evidenceSummary(metric, t) {
+  if (metric.availability === 'historical_state_not_retained') return t('Historical position unavailable')
+  return t(metric.sampleSize === 1 ? '{count} source' : '{count} sources', { count: metric.sampleSize })
+}
+
+function performanceMessage(item, scorecard, t) {
+  const metrics = (scorecard?.perspectives || EMPTY_LIST).flatMap(perspective => perspective.metrics || EMPTY_LIST)
+  if (item.code === 'performance_target_revisions_pending') {
+    return t('{count} performance target revision(s) await approval. Resolve them before freezing a scorecard.', {
+      count: item.targetIds?.length || scorecard?.targets?.pending?.length || 0,
+    })
+  }
+  if (item.code === 'performance_historical_point_in_time_unavailable') {
+    return t('{count} point-in-time KPI(s) are unavailable for a past period because mutable operating state is not reconstructed. Use retained snapshots for historical positions.', {
+      count: metrics.filter(metric => metric.availability === 'historical_state_not_retained').length,
+    })
+  }
+  if (item.code === 'performance_metrics_missing_data') {
+    return t('{missing} of {total} KPI(s) lack retained evidence for this period.', {
+      missing: scorecard?.summary?.noData || 0,
+      total: scorecard?.summary?.metricCount || metrics.length,
+    })
+  }
+  if (item.code === 'performance_metrics_off_track') {
+    return t('{count} KPI(s) are materially below target.', { count: scorecard?.summary?.offTrack || 0 })
+  }
+  return item.message
 }
 
 export default function PerformanceScorecard({
@@ -64,7 +89,9 @@ export default function PerformanceScorecard({
   canApprove,
   onChange,
   onOpenApprovals,
+  locale = 'en-GB',
 }) {
+  const t = (key, variables) => operatorText(locale, key, variables)
   const [periodEnd, setPeriodEnd] = useState(scorecard?.periodEnd || new Date().toISOString().slice(0, 10))
   const [weeks, setWeeks] = useState(String(scorecard?.weeks || 13))
   const [perspective, setPerspective] = useState(scorecard?.perspectives?.[0]?.key || 'safety')
@@ -100,7 +127,7 @@ export default function PerformanceScorecard({
     try {
       await action()
     } catch (nextError) {
-      setError(nextError.message || 'The performance scorecard action could not be completed.')
+      setError(nextError.message || t('The performance scorecard action could not be completed.'))
     } finally {
       setBusy(false)
     }
@@ -117,7 +144,7 @@ export default function PerformanceScorecard({
     event.preventDefault()
     perform(async () => {
       await loadScorecard()
-      setNotice('Performance evidence recalculated for the selected period.')
+      setNotice(t('Performance evidence recalculated for the selected period.'))
     })
   }
 
@@ -145,7 +172,7 @@ export default function PerformanceScorecard({
       onChange(result.scorecard)
       setTargetMetric(null)
       setTargetReason('')
-      setNotice(`${targetMetric.label} target revision retained for approval.`)
+      setNotice(t('{label} target revision retained for approval.', { label: targetMetric.label }))
     })
   }
 
@@ -157,53 +184,53 @@ export default function PerformanceScorecard({
       })
       await loadScorecard()
       setNotice(result.replayed
-        ? `${result.snapshot.scorecardNumber} is already awaiting review.`
-        : `${result.snapshot.scorecardNumber} retained for approval. No external action was created.`)
+        ? t('{number} is already awaiting review.', { number: result.snapshot.scorecardNumber })
+        : t('{number} retained for approval. No external action was created.', { number: result.snapshot.scorecardNumber }))
     })
   }
 
   if (!scorecard) {
-    return <div className="performance-loading" role="status">Preparing the Contractor Balanced Scorecard</div>
+    return <div className="performance-loading" role="status">{t('Preparing the Contractor Balanced Scorecard')}</div>
   }
 
   return (
     <section className="performance-scorecard" data-testid="performance-scorecard" aria-busy={busy || undefined}>
       <header className="performance-heading">
         <div>
-          <span className="eyebrow">Operating performance</span>
-          <h2>Contractor Balanced Scorecard</h2>
-          <p>{formatDate(scorecard.periodStart)} to {formatDate(scorecard.periodEnd)}</p>
+          <span className="eyebrow">{t('Operating performance')}</span>
+          <h2>{t('Contractor Balanced Scorecard')}</h2>
+          <p>{t('{start} to {end}', { start: formatDate(scorecard.periodStart), end: formatDate(scorecard.periodEnd) })}</p>
         </div>
         <div className="performance-snapshot-state">
-          {scorecard.snapshotCurrent ? <span className="tag tag-green"><Check size={14} /> Current snapshot</span> : null}
-          {currentSnapshot && !scorecard.snapshotCurrent ? <span className="tag tag-amber"><TriangleAlert size={14} /> Snapshot stale</span> : null}
-          {pendingSnapshot ? <span className="tag tag-blue"><LockKeyhole size={14} /> Review pending</span> : null}
+          {scorecard.snapshotCurrent ? <span className="tag tag-green"><Check size={14} /> {t('Current snapshot')}</span> : null}
+          {currentSnapshot && !scorecard.snapshotCurrent ? <span className="tag tag-amber"><TriangleAlert size={14} /> {t('Snapshot stale')}</span> : null}
+          {pendingSnapshot ? <span className="tag tag-blue"><LockKeyhole size={14} /> {t('Review pending')}</span> : null}
         </div>
       </header>
 
       <form className="performance-period" onSubmit={recalculate}>
         <label>
-          Period end
+          {t('Period end')}
           <input type="date" value={periodEnd} onChange={event => setPeriodEnd(event.target.value)} required />
         </label>
         <label>
-          Weeks
+          {t('Weeks')}
           <input type="number" min="4" max="52" step="1" value={weeks} onChange={event => setWeeks(event.target.value)} required />
         </label>
         <button className="secondary-button" type="submit" disabled={busy}>
           <RefreshCw size={16} className={busy ? 'spin' : ''} />
-          Recalculate
+          {t('Recalculate')}
         </button>
         {canCoordinate ? (
           <button className="primary-button" type="button" disabled={busy || !scorecard.ready || Boolean(pendingSnapshot)} onClick={requestSnapshot}>
             <LockKeyhole size={16} />
-            Freeze scorecard
+            {t('Freeze scorecard')}
           </button>
         ) : null}
         {canApprove && pendingSnapshot?.approvalId ? (
           <button className="secondary-button" type="button" onClick={() => onOpenApprovals({ approvalId: pendingSnapshot.approvalId })}>
             <ClipboardCheck size={16} />
-            Review snapshot
+            {t('Review snapshot')}
           </button>
         ) : null}
       </form>
@@ -212,23 +239,23 @@ export default function PerformanceScorecard({
       {notice ? <div className="performance-banner performance-banner-notice"><Check size={16} /><span>{notice}</span></div> : null}
       {(scorecard.blockers || EMPTY_LIST).map(blocker => (
         <div className="performance-banner performance-banner-error" key={blocker.code}>
-          <TriangleAlert size={16} /><span>{blocker.message}</span>
+          <TriangleAlert size={16} /><span>{performanceMessage(blocker, scorecard, t)}</span>
         </div>
       ))}
       {(scorecard.warnings || EMPTY_LIST).map(warning => (
         <div className="performance-banner performance-banner-warning" key={warning.code}>
-          <TriangleAlert size={16} /><span>{warning.message}</span>
+          <TriangleAlert size={16} /><span>{performanceMessage(warning, scorecard, t)}</span>
         </div>
       ))}
 
-      <div className="performance-summary" aria-label="Scorecard summary">
-        <div><span>Overall score</span><strong>{formatNumber(summary.overallScore || 0, { maximumFractionDigits: 1 })}</strong><progress max="100" value={summary.overallScore || 0} /></div>
-        <div><span>Evidence coverage</span><strong>{formatNumber(summary.dataCoveragePct || 0, { maximumFractionDigits: 1 })}%</strong><small>{summary.metricCount || 23} governed KPIs</small></div>
-        <div><span>On track</span><strong>{summary.onTrack || 0}</strong><small>{summary.watch || 0} watch</small></div>
-        <div><span>Attention</span><strong>{summary.offTrack || 0}</strong><small>{summary.noData || 0} without evidence</small></div>
+      <div className="performance-summary" aria-label={t('Scorecard summary')}>
+        <div><span>{t('Overall score')}</span><strong>{formatNumber(summary.overallScore || 0, { maximumFractionDigits: 1 })}</strong><progress max="100" value={summary.overallScore || 0} /></div>
+        <div><span>{t('Evidence coverage')}</span><strong>{formatNumber(summary.dataCoveragePct || 0, { maximumFractionDigits: 1 })}%</strong><small>{t('{count} governed KPIs', { count: summary.metricCount || 23 })}</small></div>
+        <div><span>{t('On track')}</span><strong>{summary.onTrack || 0}</strong><small>{summary.watch || 0} {t('watch')}</small></div>
+        <div><span>{t('Attention')}</span><strong>{summary.offTrack || 0}</strong><small>{t('{count} without evidence', { count: summary.noData || 0 })}</small></div>
       </div>
 
-      <div className="performance-tabs" role="tablist" aria-label="Scorecard perspectives">
+      <div className="performance-tabs" role="tablist" aria-label={t('Scorecard perspectives')}>
         {perspectives.map(item => (
           <button
             key={item.key}
@@ -238,7 +265,7 @@ export default function PerformanceScorecard({
             className={item.key === currentPerspective?.key ? 'performance-tab-active' : ''}
             onClick={() => setPerspective(item.key)}
           >
-            <span>{PERSPECTIVE_LABELS[item.key] || formatStatus(item.key)}</span>
+            <span>{t(PERSPECTIVE_LABELS[item.key] || formatStatus(item.key))}</span>
             <b>{formatNumber(item.score || 0, { maximumFractionDigits: 1 })}</b>
           </button>
         ))}
@@ -248,40 +275,43 @@ export default function PerformanceScorecard({
         <div className="performance-perspective" role="tabpanel">
           <div className="performance-perspective-heading">
             <div>
-              <h3>{PERSPECTIVE_LABELS[currentPerspective.key] || formatStatus(currentPerspective.key)}</h3>
-              <p>{currentPerspective.onTrack} on track, {currentPerspective.noData} without evidence</p>
+              <h3>{t(PERSPECTIVE_LABELS[currentPerspective.key] || formatStatus(currentPerspective.key))}</h3>
+              <p>{t('{onTrack} on track, {noData} without evidence', { onTrack: currentPerspective.onTrack, noData: currentPerspective.noData })}</p>
             </div>
-            <span className={`performance-status performance-status-${currentPerspective.status}`}>{statusLabel(currentPerspective.status)}</span>
+            <span className={`performance-status performance-status-${currentPerspective.status}`}>{statusLabel(currentPerspective.status, t)}</span>
           </div>
           <div className="performance-table-scroll" data-testid="performance-metric-table">
             <table className="performance-table">
               <thead>
-                <tr><th>KPI</th><th>Current</th><th>Target</th><th>Prior period</th><th>Evidence</th><th>Status</th><th aria-label="Actions" /></tr>
+                <tr><th>KPI</th><th>{t('Current')}</th><th>{t('Target')}</th><th>{t('Prior period')}</th><th>{t('Evidence')}</th><th>{t('Status')}</th><th aria-label={t('Actions')} /></tr>
               </thead>
               <tbody>
                 {currentPerspective.metrics.map(metric => (
                   <tr key={metric.key}>
                     <th scope="row">
                       <span>{metric.label}</span>
-                      <small>{metric.basis === 'point_in_time' ? 'Point-in-time position' : 'Reporting-period measure'} | {metric.comparison === 'at_least' ? 'Minimum' : 'Maximum'} threshold</small>
+                      <small>{t('{basis} | {comparison} threshold', {
+                        basis: t(metric.basis === 'point_in_time' ? 'Point-in-time position' : 'Reporting-period measure'),
+                        comparison: t(metric.comparison === 'at_least' ? 'Minimum' : 'Maximum'),
+                      })}</small>
                     </th>
-                    <td><strong>{metricValue(metric.value, metric.unit)}</strong></td>
-                    <td>{metricValue(metric.targetValue, metric.unit)}<small>{metric.targetSource === 'approved_revision' ? 'Approved revision' : 'Default policy'}</small></td>
+                    <td><strong>{metricValue(metric.value, metric.unit, t)}</strong></td>
+                    <td>{metricValue(metric.targetValue, metric.unit, t)}<small>{t(metric.targetSource === 'approved_revision' ? 'Approved revision' : 'Default policy')}</small></td>
                     <td>
-                      <span className={`performance-trend performance-trend-${metric.trend}`}>{trendIcon(metric)} {metricValue(metric.priorValue, metric.unit)}</span>
+                      <span className={`performance-trend performance-trend-${metric.trend}`}>{trendIcon(metric)} {metricValue(metric.priorValue, metric.unit, t)}</span>
                     </td>
                     <td>
                       <details>
-                        <summary>{evidenceSummary(metric)}</summary>
+                        <summary>{evidenceSummary(metric, t)}</summary>
                         <span>{metric.availability === 'historical_state_not_retained'
-                          ? 'Use the retained scorecard snapshot for the period-end operating position.'
-                          : metric.evidenceIds.length ? metric.evidenceIds.join(', ') : 'No retained source IDs'}</span>
+                          ? t('Use the retained scorecard snapshot for the period-end operating position.')
+                          : metric.evidenceIds.length ? metric.evidenceIds.join(', ') : t('No retained source IDs')}</span>
                       </details>
                     </td>
-                    <td><span className={`performance-status performance-status-${metric.status}`}>{statusLabel(metric.status)}</span></td>
+                    <td><span className={`performance-status performance-status-${metric.status}`}>{statusLabel(metric.status, t)}</span></td>
                     <td>
                       {canCoordinate ? (
-                        <button className="icon-button" type="button" title={`Revise ${metric.label} target`} aria-label={`Revise ${metric.label} target`} onClick={() => openTarget(metric)} disabled={busy}>
+                        <button className="icon-button" type="button" title={t('Revise {label} target', { label: metric.label })} aria-label={t('Revise {label} target', { label: metric.label })} onClick={() => openTarget(metric)} disabled={busy}>
                           <Pencil size={15} />
                         </button>
                       ) : null}
@@ -295,21 +325,21 @@ export default function PerformanceScorecard({
       ) : null}
 
       <div className="performance-history">
-        <div><span>Active snapshot</span><strong>{currentSnapshot?.scorecardNumber || 'None approved'}</strong></div>
-        <div><span>Pending targets</span><strong>{scorecard.targets?.pending?.length || 0}</strong></div>
-        <div><span>Retained snapshots</span><strong>{scorecard.snapshots?.length || 0}</strong></div>
+        <div><span>{t('Active snapshot')}</span><strong>{currentSnapshot?.scorecardNumber || t('None approved')}</strong></div>
+        <div><span>{t('Pending targets')}</span><strong>{scorecard.targets?.pending?.length || 0}</strong></div>
+        <div><span>{t('Retained snapshots')}</span><strong>{scorecard.snapshots?.length || 0}</strong></div>
       </div>
 
       {targetMetric ? (
         <div className="modal-backdrop" role="presentation">
           <section className="modal performance-target-modal" role="dialog" aria-modal="true" aria-labelledby="performance-target-title">
             <div className="modal-heading">
-              <div><span className="eyebrow">Target revision</span><h2 id="performance-target-title">{targetMetric.label}</h2></div>
-              <button className="icon-button" type="button" aria-label="Close target revision" onClick={() => setTargetMetric(null)} disabled={busy}><X size={18} /></button>
+              <div><span className="eyebrow">{t('Target revision')}</span><h2 id="performance-target-title">{targetMetric.label}</h2></div>
+              <button className="icon-button" type="button" aria-label={t('Close target revision')} onClick={() => setTargetMetric(null)} disabled={busy}><X size={18} /></button>
             </div>
             <form onSubmit={submitTarget}>
               <label>
-                Target {targetMetric.unit === 'percent' ? '(%)' : ''}
+                {t('Target')} {targetMetric.unit === 'percent' ? '(%)' : ''}
                 <input
                   type="number"
                   min={targetMetric.key === 'net_promoter_score' ? '-100' : '0'}
@@ -321,12 +351,12 @@ export default function PerformanceScorecard({
                 />
               </label>
               <label>
-                Revision reason
-                <textarea minLength="8" maxLength="500" value={targetReason} onChange={event => setTargetReason(event.target.value)} required placeholder="Retained management basis for this threshold" />
+                {t('Revision reason')}
+                <textarea minLength="8" maxLength="500" value={targetReason} onChange={event => setTargetReason(event.target.value)} required placeholder={t('Retained management basis for this threshold')} />
               </label>
               <div className="modal-actions">
-                <button className="secondary-button" type="button" onClick={() => setTargetMetric(null)} disabled={busy}>Cancel</button>
-                <button className="primary-button" type="submit" disabled={busy || targetReason.trim().length < 8}><ClipboardCheck size={16} />Request approval</button>
+                <button className="secondary-button" type="button" onClick={() => setTargetMetric(null)} disabled={busy}>{t('Cancel')}</button>
+                <button className="primary-button" type="submit" disabled={busy || targetReason.trim().length < 8}><ClipboardCheck size={16} />{t('Request approval')}</button>
               </div>
             </form>
           </section>

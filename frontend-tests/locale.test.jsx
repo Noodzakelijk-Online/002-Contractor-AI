@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { appText, normalizeLocale, portalText } from '../locale'
+import { appText, normalizeLocale, operatorText, portalText } from '../locale'
 import { currency, formatCurrency, formatDate, formatNumber, formatWeekday, roundDisplay, setDashboardLocale } from '../dashboard-format'
 
 describe('locale contract', () => {
@@ -14,6 +14,13 @@ describe('locale contract', () => {
     expect(appText('en-GB', 'shell.activeSummary', { jobs: 3, approvals: 2 })).toBe('3 active jobs, 2 decisions awaiting review')
     expect(portalText('en-GB', 'Reageer uiterlijk {date}', { date: '13 Aug 2026' })).toBe('Respond by 13 Aug 2026')
     expect(portalText('nl-NL', 'Werkadres')).toBe('Werkadres')
+  })
+
+  it('translates specialist operator controls and interpolates runtime values', () => {
+    expect(operatorText('nl-NL', 'Contractor Balanced Scorecard')).toBe('Aannemersscorekaart')
+    expect(operatorText('nl-NL', '{count} reviews due', { count: 2 })).toBe('2 beoordelingen vereist')
+    expect(operatorText('en-GB', 'Framework')).toBe('Framework')
+    expect(operatorText('nl-NL', 'Unmapped retained text')).toBe('Unmapped retained text')
   })
 
   it('switches dashboard currency, number, and date formatting at runtime', () => {

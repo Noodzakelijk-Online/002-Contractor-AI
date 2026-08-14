@@ -73,7 +73,9 @@ test('performance workspace renders ten evidence-backed perspectives with govern
   assert.match(dashboardSource, /\/api\/ledger\/performance-scorecard\/targets/);
   assert.match(dashboardSource, /\/api\/ledger\/performance-scorecard\/snapshots/);
   assert.match(dashboardSource, /summary\.metricCount \|\| 23/);
-  assert.match(dashboardSource, /if \(status === 'no_data'\) return 'No data'/);
+  assert.match(dashboardSource, /if \(status === 'no_data'\) return t\('No data'\)/);
+  assert.match(dashboardSource, /import \{ operatorText \} from '\.\.\/locale'/);
+  assert.match(dashboardRootSource, /<PerformanceScorecard[\s\S]*locale=\{operatorLocale\}/);
   assert.match(dashboardSource, /canApprove && pendingSnapshot\?\.approvalId/);
   assert.match(dashboardSource, /No external action was created/);
 });

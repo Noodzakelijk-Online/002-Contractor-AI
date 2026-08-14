@@ -11640,6 +11640,7 @@ function App() {
                     scorecard={data.performanceScorecard}
                     request={api}
                     canCoordinate={canCoordinate}
+                    locale={operatorLocale}
                     canApprove={capabilities.approvals === true}
                     onChange={(performanceScorecard) => setData((current) => ({ ...current, performanceScorecard }))}
                     onOpenApprovals={openApprovals}
@@ -11652,6 +11653,7 @@ function App() {
                     jobs={jobs}
                     request={api}
                     canCoordinate={canCoordinate}
+                    locale={operatorLocale}
                     onChange={(frameworkWorkspace) => setData((current) => ({ ...current, frameworkWorkspace }))}
                   />
                 </LazyControlBoundary>
