@@ -3890,6 +3890,7 @@ function InspectionChecklistControl({
 
 function NonconformanceControl({
   job,
+  locale = 'en-GB',
   canReport,
   canCoordinate,
   canApprove,
@@ -3901,6 +3902,7 @@ function NonconformanceControl({
   onRequestClosure,
   onOpenApprovals,
 }) {
+  const t = (key, variables = {}) => operatorText(locale, key, variables)
   const records = job.nonconformances || EMPTY_LIST
   const [editor, setEditor] = useState(null)
   const [draft, setDraft] = useState(() => emptyNonconformanceDraft(operator?.name || ''))
@@ -3986,65 +3988,65 @@ function NonconformanceControl({
       <div className="section-heading field-risk-heading">
         <ClipboardPenLine size={18} />
         <div>
-          <h3>Nonconformance register</h3>
-          <p>Quality deviations, containment, corrective action, and independent verification.</p>
+          <h3>{t('Nonconformance register')}</h3>
+          <p>{t('Quality deviations, containment, corrective action, and independent verification.')}</p>
         </div>
-        {canReport ? <button type="button" className="secondary-button" disabled={submitting} onClick={beginCreate}><Plus size={15} />New NCR</button> : null}
+        {canReport ? <button type="button" className="secondary-button" disabled={submitting} onClick={beginCreate}><Plus size={15} />{t('New NCR')}</button> : null}
       </div>
 
-      <div className="field-risk-summary" aria-label="Nonconformance summary">
-        <div><span>Open NCRs</span><strong>{open}</strong></div>
-        <div><span>Correction review</span><strong>{pendingCorrection}</strong></div>
-        <div><span>Closure review</span><strong>{pendingClosure}</strong></div>
-        <div><span>Overdue</span><strong>{overdue}</strong></div>
+      <div className="field-risk-summary" aria-label={t('Nonconformance summary')}>
+        <div><span>{t('Open NCRs')}</span><strong>{open}</strong></div>
+        <div><span>{t('Correction review')}</span><strong>{pendingCorrection}</strong></div>
+        <div><span>{t('Closure review')}</span><strong>{pendingClosure}</strong></div>
+        <div><span>{t('Overdue')}</span><strong>{overdue}</strong></div>
       </div>
 
       {editor ? (
         <form className="field-risk-form form-grid compact-form" data-testid={`nonconformance-${editor.type}-form`} onSubmit={submit}>
           {editor.type === 'create' ? (
             <>
-              <label>Severity<select value={draft.severity} onChange={(event) => setDraft({ ...draft, severity: event.target.value })}><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="critical">Critical</option></select></label>
-              <label>Discipline<input required minLength="2" maxLength="80" value={draft.discipline} onChange={(event) => setDraft({ ...draft, discipline: event.target.value })} placeholder="Quality, structural, MEP" /></label>
-              <label className="form-span">NCR title<input autoFocus required minLength="3" maxLength="240" value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} placeholder="Observed deviation from retained requirement" /></label>
-              <label>Detected at<input required type="datetime-local" value={draft.detectedAt} onChange={(event) => setDraft({ ...draft, detectedAt: event.target.value })} /></label>
-              <label>Raised by<input required minLength="2" maxLength="160" value={draft.raisedBy} onChange={(event) => setDraft({ ...draft, raisedBy: event.target.value })} /></label>
-              <label className="form-span">Observed condition<textarea required minLength="4" maxLength="4000" value={draft.description} onChange={(event) => setDraft({ ...draft, description: event.target.value })} /></label>
-              <label>Location<input maxLength="500" value={draft.location} onChange={(event) => setDraft({ ...draft, location: event.target.value })} /></label>
-              <label>Corrective due date<input required type="date" value={draft.dueAt} onChange={(event) => setDraft({ ...draft, dueAt: event.target.value })} /></label>
-              <label className="form-span">Requirement reference<textarea required minLength="3" maxLength="500" value={draft.requirementReference} onChange={(event) => setDraft({ ...draft, requirementReference: event.target.value })} placeholder="Drawing, specification, approved sample, method, or acceptance criterion" /></label>
-              <label className="form-span">Immediate containment<textarea required minLength="4" maxLength="4000" value={draft.immediateContainment} onChange={(event) => setDraft({ ...draft, immediateContainment: event.target.value })} /></label>
-              <label>Responsible party<input required minLength="2" maxLength="160" value={draft.responsibleParty} onChange={(event) => setDraft({ ...draft, responsibleParty: event.target.value })} /></label>
-              <label>Source inspection<select value={draft.sourceInspectionId} onChange={(event) => setDraft({ ...draft, sourceInspectionId: event.target.value })}><option value="">No source inspection</option>{(job.inspections || EMPTY_LIST).map((inspection) => <option key={inspection.id} value={inspection.id}>{inspection.title}</option>)}</select></label>
-              <label>Source observation<select value={draft.sourceObservationId} onChange={(event) => setDraft({ ...draft, sourceObservationId: event.target.value })}><option value="">No source observation</option>{(job.observations || EMPTY_LIST).map((observation) => <option key={observation.id} value={observation.id}>{observation.title}</option>)}</select></label>
-              <label>Evidence document<select value={draft.evidenceDocumentId} onChange={(event) => setDraft({ ...draft, evidenceDocumentId: event.target.value })}><option value="">No linked document</option>{(job.documents || EMPTY_LIST).map((document) => <option key={document.id} value={document.id}>{document.title || document.filename || document.id}</option>)}</select></label>
-              <label className="form-span">Notes<textarea maxLength="2000" value={draft.notes} onChange={(event) => setDraft({ ...draft, notes: event.target.value })} /></label>
+              <label>{t('Severity')}<select value={draft.severity} onChange={(event) => setDraft({ ...draft, severity: event.target.value })}><option value="low">{t('Low')}</option><option value="medium">{t('Medium')}</option><option value="high">{t('High')}</option><option value="critical">{t('Critical')}</option></select></label>
+              <label>{t('Discipline')}<input required minLength="2" maxLength="80" value={draft.discipline} onChange={(event) => setDraft({ ...draft, discipline: event.target.value })} placeholder={t('Quality, structural, MEP')} /></label>
+              <label className="form-span">{t('NCR title')}<input autoFocus required minLength="3" maxLength="240" value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} placeholder={t('Observed deviation from retained requirement')} /></label>
+              <label>{t('Detected at')}<input required type="datetime-local" value={draft.detectedAt} onChange={(event) => setDraft({ ...draft, detectedAt: event.target.value })} /></label>
+              <label>{t('Raised by')}<input required minLength="2" maxLength="160" value={draft.raisedBy} onChange={(event) => setDraft({ ...draft, raisedBy: event.target.value })} /></label>
+              <label className="form-span">{t('Observed condition')}<textarea required minLength="4" maxLength="4000" value={draft.description} onChange={(event) => setDraft({ ...draft, description: event.target.value })} /></label>
+              <label>{t('Location')}<input maxLength="500" value={draft.location} onChange={(event) => setDraft({ ...draft, location: event.target.value })} /></label>
+              <label>{t('Corrective due date')}<input required type="date" value={draft.dueAt} onChange={(event) => setDraft({ ...draft, dueAt: event.target.value })} /></label>
+              <label className="form-span">{t('Requirement reference')}<textarea required minLength="3" maxLength="500" value={draft.requirementReference} onChange={(event) => setDraft({ ...draft, requirementReference: event.target.value })} placeholder={t('Drawing, specification, approved sample, method, or acceptance criterion')} /></label>
+              <label className="form-span">{t('Immediate containment')}<textarea required minLength="4" maxLength="4000" value={draft.immediateContainment} onChange={(event) => setDraft({ ...draft, immediateContainment: event.target.value })} /></label>
+              <label>{t('Responsible party')}<input required minLength="2" maxLength="160" value={draft.responsibleParty} onChange={(event) => setDraft({ ...draft, responsibleParty: event.target.value })} /></label>
+              <label>{t('Source inspection')}<select value={draft.sourceInspectionId} onChange={(event) => setDraft({ ...draft, sourceInspectionId: event.target.value })}><option value="">{t('No source inspection')}</option>{(job.inspections || EMPTY_LIST).map((inspection) => <option key={inspection.id} value={inspection.id}>{inspection.title}</option>)}</select></label>
+              <label>{t('Source observation')}<select value={draft.sourceObservationId} onChange={(event) => setDraft({ ...draft, sourceObservationId: event.target.value })}><option value="">{t('No source observation')}</option>{(job.observations || EMPTY_LIST).map((observation) => <option key={observation.id} value={observation.id}>{observation.title}</option>)}</select></label>
+              <label>{t('Evidence document')}<select value={draft.evidenceDocumentId} onChange={(event) => setDraft({ ...draft, evidenceDocumentId: event.target.value })}><option value="">{t('No linked document')}</option>{(job.documents || EMPTY_LIST).map((document) => <option key={document.id} value={document.id}>{document.title || document.filename || document.id}</option>)}</select></label>
+              <label className="form-span">{t('Notes')}<textarea maxLength="2000" value={draft.notes} onChange={(event) => setDraft({ ...draft, notes: event.target.value })} /></label>
             </>
           ) : editor.type === 'correction' ? (
             <>
               <div className="form-span workflow-note"><strong>{editor.record.ncrNumber}</strong> / {editor.record.title}</div>
-              <label className="form-span">Root cause<textarea autoFocus required minLength="4" maxLength="4000" value={draft.rootCause} onChange={(event) => setDraft({ ...draft, rootCause: event.target.value })} /></label>
-              <label className="form-span">Corrective action<textarea required minLength="4" maxLength="4000" value={draft.correctiveAction} onChange={(event) => setDraft({ ...draft, correctiveAction: event.target.value })} /></label>
-              <label>Responsible party<input required minLength="2" maxLength="160" value={draft.responsibleParty} onChange={(event) => setDraft({ ...draft, responsibleParty: event.target.value })} /></label>
-              <label>Corrective due date<input required type="date" value={draft.dueAt} onChange={(event) => setDraft({ ...draft, dueAt: event.target.value })} /></label>
-              <label className="form-span">Evidence reference<input required minLength="3" maxLength="500" value={draft.evidenceReference} onChange={(event) => setDraft({ ...draft, evidenceReference: event.target.value })} placeholder="Method review, test plan, drawing, or retained internal reference" /></label>
-              <label>Evidence document<select value={draft.evidenceDocumentId} onChange={(event) => setDraft({ ...draft, evidenceDocumentId: event.target.value })}><option value="">No linked document</option>{(job.documents || EMPTY_LIST).map((document) => <option key={document.id} value={document.id}>{document.title || document.filename || document.id}</option>)}</select></label>
-              <label>Review notes<textarea maxLength="2000" value={draft.notes} onChange={(event) => setDraft({ ...draft, notes: event.target.value })} /></label>
+              <label className="form-span">{t('Root cause')}<textarea autoFocus required minLength="4" maxLength="4000" value={draft.rootCause} onChange={(event) => setDraft({ ...draft, rootCause: event.target.value })} /></label>
+              <label className="form-span">{t('Corrective action')}<textarea required minLength="4" maxLength="4000" value={draft.correctiveAction} onChange={(event) => setDraft({ ...draft, correctiveAction: event.target.value })} /></label>
+              <label>{t('Responsible party')}<input required minLength="2" maxLength="160" value={draft.responsibleParty} onChange={(event) => setDraft({ ...draft, responsibleParty: event.target.value })} /></label>
+              <label>{t('Corrective due date')}<input required type="date" value={draft.dueAt} onChange={(event) => setDraft({ ...draft, dueAt: event.target.value })} /></label>
+              <label className="form-span">{t('Evidence reference')}<input required minLength="3" maxLength="500" value={draft.evidenceReference} onChange={(event) => setDraft({ ...draft, evidenceReference: event.target.value })} placeholder={t('Method review, test plan, drawing, or retained internal reference')} /></label>
+              <label>{t('Evidence document')}<select value={draft.evidenceDocumentId} onChange={(event) => setDraft({ ...draft, evidenceDocumentId: event.target.value })}><option value="">{t('No linked document')}</option>{(job.documents || EMPTY_LIST).map((document) => <option key={document.id} value={document.id}>{document.title || document.filename || document.id}</option>)}</select></label>
+              <label>{t('Review notes')}<textarea maxLength="2000" value={draft.notes} onChange={(event) => setDraft({ ...draft, notes: event.target.value })} /></label>
             </>
           ) : (
             <>
-              <div className="form-span workflow-note"><strong>{editor.record.ncrNumber}</strong> / approved correction: {editor.record.correctiveAction?.correctiveAction}</div>
-              <label>Verification result<select value={draft.verificationResult} onChange={(event) => setDraft({ ...draft, verificationResult: event.target.value })}><option value="passed">Passed</option></select></label>
-              <label>Verified at<input required type="datetime-local" value={draft.verifiedAt} onChange={(event) => setDraft({ ...draft, verifiedAt: event.target.value })} /></label>
-              <label>Verified by<input required minLength="2" maxLength="160" value={draft.verifiedBy} onChange={(event) => setDraft({ ...draft, verifiedBy: event.target.value })} /></label>
-              <label>Evidence document<select value={draft.evidenceDocumentId} onChange={(event) => setDraft({ ...draft, evidenceDocumentId: event.target.value })}><option value="">No linked document</option>{(job.documents || EMPTY_LIST).map((document) => <option key={document.id} value={document.id}>{document.title || document.filename || document.id}</option>)}</select></label>
-              <label className="form-span">Verification evidence<input autoFocus required minLength="3" maxLength="500" value={draft.verificationEvidence} onChange={(event) => setDraft({ ...draft, verificationEvidence: event.target.value })} placeholder="Inspection, test, survey, or retained evidence reference" /></label>
-              <label className="form-span">Verification notes<textarea maxLength="2000" value={draft.notes} onChange={(event) => setDraft({ ...draft, notes: event.target.value })} /></label>
+              <div className="form-span workflow-note"><strong>{editor.record.ncrNumber}</strong> / {t('approved correction')}: {editor.record.correctiveAction?.correctiveAction}</div>
+              <label>{t('Verification result')}<select value={draft.verificationResult} onChange={(event) => setDraft({ ...draft, verificationResult: event.target.value })}><option value="passed">{t('Passed')}</option></select></label>
+              <label>{t('Verified at')}<input required type="datetime-local" value={draft.verifiedAt} onChange={(event) => setDraft({ ...draft, verifiedAt: event.target.value })} /></label>
+              <label>{t('Verified by')}<input required minLength="2" maxLength="160" value={draft.verifiedBy} onChange={(event) => setDraft({ ...draft, verifiedBy: event.target.value })} /></label>
+              <label>{t('Evidence document')}<select value={draft.evidenceDocumentId} onChange={(event) => setDraft({ ...draft, evidenceDocumentId: event.target.value })}><option value="">{t('No linked document')}</option>{(job.documents || EMPTY_LIST).map((document) => <option key={document.id} value={document.id}>{document.title || document.filename || document.id}</option>)}</select></label>
+              <label className="form-span">{t('Verification evidence')}<input autoFocus required minLength="3" maxLength="500" value={draft.verificationEvidence} onChange={(event) => setDraft({ ...draft, verificationEvidence: event.target.value })} placeholder={t('Inspection, test, survey, or retained evidence reference')} /></label>
+              <label className="form-span">{t('Verification notes')}<textarea maxLength="2000" value={draft.notes} onChange={(event) => setDraft({ ...draft, notes: event.target.value })} /></label>
             </>
           )}
-          <p className="workflow-note form-span">NCR closure remains separate from inspection sign-off, client acceptance, contract completion, and external communication.</p>
+          <p className="workflow-note form-span">{t('NCR closure remains separate from inspection sign-off, client acceptance, contract completion, and external communication.')}</p>
           <div className="form-actions form-span">
-            <button className="primary-button" disabled={submitting || createInvalid || correctionInvalid || closureInvalid || (editor.type !== 'create' && !online)}><ShieldCheck size={15} />{editor.type === 'create' ? (online ? 'Retain NCR' : 'Save NCR offline') : editor.type === 'correction' ? 'Request correction approval' : 'Request closure approval'}</button>
-            <button type="button" className="secondary-button" onClick={() => setEditor(null)}>Cancel</button>
+            <button className="primary-button" disabled={submitting || createInvalid || correctionInvalid || closureInvalid || (editor.type !== 'create' && !online)}><ShieldCheck size={15} />{editor.type === 'create' ? (online ? t('Retain NCR') : t('Save NCR offline')) : editor.type === 'correction' ? t('Request correction approval') : t('Request closure approval')}</button>
+            <button type="button" className="secondary-button" onClick={() => setEditor(null)}>{t('Cancel')}</button>
           </div>
         </form>
       ) : null}
@@ -4058,29 +4060,30 @@ function NonconformanceControl({
           return (
             <article className={`field-risk-row field-risk-${record.severity}`} key={record.id} data-testid={`nonconformance-${record.id}`}>
               <div className="field-risk-row-copy">
-                <div><strong>{record.ncrNumber} / {record.title}</strong><span className={`status status-${record.status}`}>{formatStatus(record.status)}</span></div>
-                <small>{formatStatus(record.discipline)} / {formatStatus(record.severity)} / detected {formatDateTime(record.detectedAt)} / due {formatDate(record.correctiveAction?.dueAt || record.dueAt)}</small>
+                <div><strong>{record.ncrNumber} / {record.title}</strong><span className={`status status-${record.status}`}>{t(formatStatus(record.status))}</span></div>
+                <small>{t(formatStatus(record.discipline))} / {t(formatStatus(record.severity))} / {t('detected {detected} / due {due}', { detected: formatDateTime(record.detectedAt), due: formatDate(record.correctiveAction?.dueAt || record.dueAt) })}</small>
                 <p>{record.description}</p>
-                {record.correctiveAction ? <p><strong>Correction:</strong> {record.correctiveAction.correctiveAction}</p> : null}
-                {record.closure ? <p><strong>Verified:</strong> {record.closure.verificationEvidence}</p> : null}
+                {record.correctiveAction ? <p><strong>{t('Correction')}:</strong> {record.correctiveAction.correctiveAction}</p> : null}
+                {record.closure ? <p><strong>{t('Verified')}:</strong> {record.closure.verificationEvidence}</p> : null}
               </div>
               <div className="field-risk-row-actions">
-                {pending ? <span className="tag tag-amber">Approval pending</span> : null}
-                {pending && canApprove ? <button type="button" className="secondary-button" onClick={() => onOpenApprovals({ approvalId: pending.id })}><ShieldCheck size={14} />Review</button> : null}
-                {!pending && canCoordinate && correctionReady ? <button type="button" className="secondary-button" disabled={submitting || !online} onClick={() => beginCorrection(record)}><ClipboardPenLine size={14} />Corrective action</button> : null}
-                {!pending && canCoordinate && closureReady ? <button type="button" className="secondary-button" disabled={submitting || !online} onClick={() => beginClosure(record)}><BadgeCheck size={14} />Verify closure</button> : null}
+                {pending ? <span className="tag tag-amber">{t('Approval pending')}</span> : null}
+                {pending && canApprove ? <button type="button" className="secondary-button" onClick={() => onOpenApprovals({ approvalId: pending.id })}><ShieldCheck size={14} />{t('Review')}</button> : null}
+                {!pending && canCoordinate && correctionReady ? <button type="button" className="secondary-button" disabled={submitting || !online} onClick={() => beginCorrection(record)}><ClipboardPenLine size={14} />{t('Corrective action')}</button> : null}
+                {!pending && canCoordinate && closureReady ? <button type="button" className="secondary-button" disabled={submitting || !online} onClick={() => beginClosure(record)}><BadgeCheck size={14} />{t('Verify closure')}</button> : null}
               </div>
             </article>
           )
-        }) : <p className="workflow-note">No nonconformance records are retained for this job.</p>}
+        }) : <p className="workflow-note">{t('No nonconformance records are retained for this job.')}</p>}
       </div>
-      {fieldScoped ? <p className="workflow-note">Assigned field workers can capture retained facts and containment. Corrective action and closure remain office and approver controlled.</p> : null}
+      {fieldScoped ? <p className="workflow-note">{t('Assigned field workers can capture retained facts and containment. Corrective action and closure remain office and approver controlled.')}</p> : null}
     </section>
   )
 }
 
 function FieldRiskControl({
   job,
+  locale = 'en-GB',
   canReport,
   canCoordinate,
   canApprove,
@@ -4091,6 +4094,7 @@ function FieldRiskControl({
   onReview,
   onOpenApprovals,
 }) {
+  const t = (key, variables = {}) => operatorText(locale, key, variables)
   const [view, setView] = useState('observation')
   const [creating, setCreating] = useState(false)
   const [draft, setDraft] = useState(() => emptyFieldRiskDraft('observation'))
@@ -4158,7 +4162,7 @@ function FieldRiskControl({
         type: view,
         recordId: record.id,
         record,
-        label: status === 'under_review' ? 'Start incident review' : `Resolve ${view}`,
+        label: status === 'under_review' ? t('Start incident review') : t('Resolve {recordType}', { recordType: t(view) }),
         status,
       },
     )
@@ -4169,53 +4173,53 @@ function FieldRiskControl({
       <div className="section-heading field-risk-heading">
         <TriangleAlert size={18} />
         <div>
-          <h3>Field risk register</h3>
-          <p>Observed quality, safety, environmental, and access conditions with retained evidence and accountable review.</p>
+          <h3>{t('Field risk register')}</h3>
+          <p>{t('Observed quality, safety, environmental, and access conditions with retained evidence and accountable review.')}</p>
         </div>
-        {canReport ? <button type="button" className="secondary-button" disabled={submitting} onClick={beginCreate}><Plus size={15} />{view === 'incident' ? 'Report incident' : 'New observation'}</button> : null}
+        {canReport ? <button type="button" className="secondary-button" disabled={submitting} onClick={beginCreate}><Plus size={15} />{view === 'incident' ? t('Report incident') : t('New observation')}</button> : null}
       </div>
 
-      <div className="field-risk-summary" aria-label="Field risk summary">
-        <div><span>Open observations</span><strong>{openObservations}</strong></div>
-        <div><span>Open incidents</span><strong>{openIncidents}</strong></div>
-        <div><span>High risk</span><strong>{highRiskOpen}</strong></div>
-        <div><span>Pending review</span><strong>{pendingApprovals}</strong></div>
+      <div className="field-risk-summary" aria-label={t('Field risk summary')}>
+        <div><span>{t('Open observations')}</span><strong>{openObservations}</strong></div>
+        <div><span>{t('Open incidents')}</span><strong>{openIncidents}</strong></div>
+        <div><span>{t('High risk')}</span><strong>{highRiskOpen}</strong></div>
+        <div><span>{t('Pending review')}</span><strong>{pendingApprovals}</strong></div>
       </div>
 
-      <div className="field-risk-tabs" role="tablist" aria-label="Field risk record type">
-        <button type="button" role="tab" aria-selected={view === 'observation'} className={view === 'observation' ? 'active' : ''} onClick={() => selectView('observation')}>Observations <span>{observations.length}</span></button>
-        <button type="button" role="tab" aria-selected={view === 'incident'} className={view === 'incident' ? 'active' : ''} onClick={() => selectView('incident')}>Incidents <span>{incidents.length}</span></button>
+      <div className="field-risk-tabs" role="tablist" aria-label={t('Field risk record type')}>
+        <button type="button" role="tab" aria-selected={view === 'observation'} className={view === 'observation' ? 'active' : ''} onClick={() => selectView('observation')}>{t('Observations')} <span>{observations.length}</span></button>
+        <button type="button" role="tab" aria-selected={view === 'incident'} className={view === 'incident' ? 'active' : ''} onClick={() => selectView('incident')}>{t('Incidents')} <span>{incidents.length}</span></button>
       </div>
 
       {creating ? (
         <form className="field-risk-form form-grid compact-form" data-testid={`field-${view}-form`} onSubmit={submitRisk}>
           {view === 'observation' ? (
             <>
-              <label>Category<select value={draft.category} onChange={(event) => setDraft({ ...draft, category: event.target.value })}><option value="quality">Quality</option><option value="safety">Safety</option><option value="environmental">Environmental</option><option value="access">Access</option><option value="coordination">Coordination</option></select></label>
-              <label>Severity<select value={draft.severity} onChange={(event) => setDraft({ ...draft, severity: event.target.value })}><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="critical">Critical</option></select></label>
-              <label className="form-span">Observation title<input autoFocus required minLength="3" maxLength="240" value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} placeholder="Observed condition or deviation" /></label>
-              <label>Responsible person<input required minLength="2" maxLength="160" value={draft.responsible} onChange={(event) => setDraft({ ...draft, responsible: event.target.value })} /></label>
-              <label>Corrective due date<input required type="date" value={draft.dueAt} onChange={(event) => setDraft({ ...draft, dueAt: event.target.value })} /></label>
-              <label className="form-span">Observed facts<textarea required minLength="4" maxLength="4000" value={draft.notes} onChange={(event) => setDraft({ ...draft, notes: event.target.value })} placeholder="Location, condition, and direct observations" /></label>
-              <label className="form-span">Immediate control or corrective action<textarea maxLength="4000" value={draft.correctiveAction} onChange={(event) => setDraft({ ...draft, correctiveAction: event.target.value })} /></label>
+              <label>{t('Category')}<select value={draft.category} onChange={(event) => setDraft({ ...draft, category: event.target.value })}><option value="quality">{t('Quality')}</option><option value="safety">{t('Safety')}</option><option value="environmental">{t('Environmental')}</option><option value="access">{t('Access')}</option><option value="coordination">{t('Coordination')}</option></select></label>
+              <label>{t('Severity')}<select value={draft.severity} onChange={(event) => setDraft({ ...draft, severity: event.target.value })}><option value="low">{t('Low')}</option><option value="medium">{t('Medium')}</option><option value="high">{t('High')}</option><option value="critical">{t('Critical')}</option></select></label>
+              <label className="form-span">{t('Observation title')}<input autoFocus required minLength="3" maxLength="240" value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} placeholder={t('Observed condition or deviation')} /></label>
+              <label>{t('Responsible person')}<input required minLength="2" maxLength="160" value={draft.responsible} onChange={(event) => setDraft({ ...draft, responsible: event.target.value })} /></label>
+              <label>{t('Corrective due date')}<input required type="date" value={draft.dueAt} onChange={(event) => setDraft({ ...draft, dueAt: event.target.value })} /></label>
+              <label className="form-span">{t('Observed facts')}<textarea required minLength="4" maxLength="4000" value={draft.notes} onChange={(event) => setDraft({ ...draft, notes: event.target.value })} placeholder={t('Location, condition, and direct observations')} /></label>
+              <label className="form-span">{t('Immediate control or corrective action')}<textarea maxLength="4000" value={draft.correctiveAction} onChange={(event) => setDraft({ ...draft, correctiveAction: event.target.value })} /></label>
             </>
           ) : (
             <>
-              <label>Incident type<select value={draft.incidentType} onChange={(event) => setDraft({ ...draft, incidentType: event.target.value })}><option value="near_miss">Near miss</option><option value="injury">Injury</option><option value="property_damage">Property damage</option><option value="environmental">Environmental</option><option value="security">Security</option><option value="unsafe_condition">Unsafe condition</option></select></label>
-              <label>Severity<select value={draft.severity} onChange={(event) => setDraft({ ...draft, severity: event.target.value })}><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="critical">Critical</option></select></label>
-              <label className="form-span">Incident title<input autoFocus required minLength="3" maxLength="240" value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} placeholder="Concise factual incident title" /></label>
-              <label>Occurred at<input required type="datetime-local" value={draft.occurredAt} onChange={(event) => setDraft({ ...draft, occurredAt: event.target.value })} /></label>
-              <label>Reported by<input required minLength="2" maxLength="160" value={draft.reportedBy} onChange={(event) => setDraft({ ...draft, reportedBy: event.target.value })} /></label>
-              <label className="form-span">Incident facts<textarea required minLength="4" maxLength="4000" value={draft.description} onChange={(event) => setDraft({ ...draft, description: event.target.value })} placeholder="What happened, where, and what was directly observed" /></label>
-              <label className="form-span">Immediate action<textarea required minLength="4" maxLength="4000" value={draft.immediateAction} onChange={(event) => setDraft({ ...draft, immediateAction: event.target.value })} placeholder="Isolation, stop-work, first aid, or other action already taken" /></label>
-              <label>Corrective action<textarea maxLength="4000" value={draft.correctiveAction} onChange={(event) => setDraft({ ...draft, correctiveAction: event.target.value })} /></label>
-              <label>Witnesses<textarea maxLength="2000" value={draft.witnesses} onChange={(event) => setDraft({ ...draft, witnesses: event.target.value })} placeholder="One name per line" /></label>
-              <label className="checkbox-label form-span"><input type="checkbox" checked={draft.reportable} onChange={(event) => setDraft({ ...draft, reportable: event.target.checked })} />Potentially reportable; requires specialist review</label>
+              <label>{t('Incident type')}<select value={draft.incidentType} onChange={(event) => setDraft({ ...draft, incidentType: event.target.value })}><option value="near_miss">{t('Near miss')}</option><option value="injury">{t('Injury')}</option><option value="property_damage">{t('Property damage')}</option><option value="environmental">{t('Environmental')}</option><option value="security">{t('Security')}</option><option value="unsafe_condition">{t('Unsafe condition')}</option></select></label>
+              <label>{t('Severity')}<select value={draft.severity} onChange={(event) => setDraft({ ...draft, severity: event.target.value })}><option value="low">{t('Low')}</option><option value="medium">{t('Medium')}</option><option value="high">{t('High')}</option><option value="critical">{t('Critical')}</option></select></label>
+              <label className="form-span">{t('Incident title')}<input autoFocus required minLength="3" maxLength="240" value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} placeholder={t('Concise factual incident title')} /></label>
+              <label>{t('Occurred at')}<input required type="datetime-local" value={draft.occurredAt} onChange={(event) => setDraft({ ...draft, occurredAt: event.target.value })} /></label>
+              <label>{t('Reported by')}<input required minLength="2" maxLength="160" value={draft.reportedBy} onChange={(event) => setDraft({ ...draft, reportedBy: event.target.value })} /></label>
+              <label className="form-span">{t('Incident facts')}<textarea required minLength="4" maxLength="4000" value={draft.description} onChange={(event) => setDraft({ ...draft, description: event.target.value })} placeholder={t('What happened, where, and what was directly observed')} /></label>
+              <label className="form-span">{t('Immediate action')}<textarea required minLength="4" maxLength="4000" value={draft.immediateAction} onChange={(event) => setDraft({ ...draft, immediateAction: event.target.value })} placeholder={t('Isolation, stop-work, first aid, or other action already taken')} /></label>
+              <label>{t('Corrective action')}<textarea maxLength="4000" value={draft.correctiveAction} onChange={(event) => setDraft({ ...draft, correctiveAction: event.target.value })} /></label>
+              <label>{t('Witnesses')}<textarea maxLength="2000" value={draft.witnesses} onChange={(event) => setDraft({ ...draft, witnesses: event.target.value })} placeholder={t('One name per line')} /></label>
+              <label className="checkbox-label form-span"><input type="checkbox" checked={draft.reportable} onChange={(event) => setDraft({ ...draft, reportable: event.target.checked })} />{t('Potentially reportable; requires specialist review')}</label>
             </>
           )}
-          <label className="form-span">Linked evidence<select value={draft.evidenceDocumentId} onChange={(event) => setDraft({ ...draft, evidenceDocumentId: event.target.value })}><option value="">No linked document</option>{(job.documents || EMPTY_LIST).map((document) => <option value={document.id} key={document.id}>{document.title || document.filename || document.id}</option>)}</select></label>
-          <p className="workflow-note form-span">This retains an internal report and review gate only. It does not notify external parties, clear a hazard, authorize work, or make a statutory filing.</p>
-          <div className="form-actions form-span"><button className="primary-button" disabled={submitting || draft.title.trim().length < 3 || (view === 'observation' ? draft.notes.trim().length < 4 || draft.responsible.trim().length < 2 : draft.description.trim().length < 4 || draft.immediateAction.trim().length < 4 || draft.reportedBy.trim().length < 2 || !toIsoDateTime(draft.occurredAt))}><ShieldCheck size={15} />{online ? (view === 'incident' ? 'Retain incident' : 'Retain observation') : view === 'incident' ? 'Save incident offline' : 'Save observation offline'}</button><button type="button" className="secondary-button" onClick={() => setCreating(false)}>Cancel</button></div>
+          <label className="form-span">{t('Linked evidence')}<select value={draft.evidenceDocumentId} onChange={(event) => setDraft({ ...draft, evidenceDocumentId: event.target.value })}><option value="">{t('No linked document')}</option>{(job.documents || EMPTY_LIST).map((document) => <option value={document.id} key={document.id}>{document.title || document.filename || document.id}</option>)}</select></label>
+          <p className="workflow-note form-span">{t('This retains an internal report and review gate only. It does not notify external parties, clear a hazard, authorize work, or make a statutory filing.')}</p>
+          <div className="form-actions form-span"><button className="primary-button" disabled={submitting || draft.title.trim().length < 3 || (view === 'observation' ? draft.notes.trim().length < 4 || draft.responsible.trim().length < 2 : draft.description.trim().length < 4 || draft.immediateAction.trim().length < 4 || draft.reportedBy.trim().length < 2 || !toIsoDateTime(draft.occurredAt))}><ShieldCheck size={15} />{online ? (view === 'incident' ? t('Retain incident') : t('Retain observation')) : view === 'incident' ? t('Save incident offline') : t('Save observation offline')}</button><button type="button" className="secondary-button" onClick={() => setCreating(false)}>{t('Cancel')}</button></div>
         </form>
       ) : null}
 
@@ -4225,17 +4229,17 @@ function FieldRiskControl({
           const detail = view === 'incident' ? record.data?.description : record.data?.notes
           return (
             <article className={`field-risk-row field-risk-${record.severity}`} key={record.id} data-testid={`field-risk-${record.id}`}>
-              <div className="field-risk-row-copy"><div><strong>{record.title}</strong><span className={`status status-${record.status}`}>{formatStatus(record.status)}</span></div><small>{formatStatus(view === 'incident' ? record.incidentType : record.category)} / {formatStatus(record.severity)} / {view === 'incident' ? formatDateTime(record.occurredAt) : `due ${formatDate(record.dueAt)}`}</small>{detail ? <p>{detail}</p> : null}</div>
+              <div className="field-risk-row-copy"><div><strong>{record.title}</strong><span className={`status status-${record.status}`}>{t(formatStatus(record.status))}</span></div><small>{t(formatStatus(view === 'incident' ? record.incidentType : record.category))} / {t(formatStatus(record.severity))} / {view === 'incident' ? formatDateTime(record.occurredAt) : t('due {date}', { date: formatDate(record.dueAt) })}</small>{detail ? <p>{detail}</p> : null}</div>
               <div className="field-risk-row-actions">
-                {pending ? <span className="tag tag-amber">Approval pending</span> : null}
-                {pending && canApprove ? <button type="button" className="secondary-button" onClick={() => onOpenApprovals({ approvalId: pending.id })}><ShieldCheck size={14} />Review</button> : null}
-                {!pending && canCoordinate && activeStatuses.has(record.status) ? <button type="button" className="secondary-button" disabled={submitting} onClick={() => openLifecycleReview(record)}><ClipboardCheck size={14} />{view === 'incident' && record.status === 'reported' ? 'Start review' : 'Resolve'}</button> : null}
+                {pending ? <span className="tag tag-amber">{t('Approval pending')}</span> : null}
+                {pending && canApprove ? <button type="button" className="secondary-button" onClick={() => onOpenApprovals({ approvalId: pending.id })}><ShieldCheck size={14} />{t('Review')}</button> : null}
+                {!pending && canCoordinate && activeStatuses.has(record.status) ? <button type="button" className="secondary-button" disabled={submitting} onClick={() => openLifecycleReview(record)}><ClipboardCheck size={14} />{view === 'incident' && record.status === 'reported' ? t('Start review') : t('Resolve')}</button> : null}
               </div>
             </article>
           )
-        }) : <p className="workflow-note">No {view === 'incident' ? 'incident' : 'observation'} records are retained for this job.</p>}
+        }) : <p className="workflow-note">{t('No {recordType} records are retained for this job.', { recordType: t(view === 'incident' ? 'incident' : 'observation') })}</p>}
       </div>
-      {fieldScoped ? <p className="workflow-note">Assigned field workers can report observed facts. Resolution and approval remain office-controlled.</p> : null}
+      {fieldScoped ? <p className="workflow-note">{t('Assigned field workers can report observed facts. Resolution and approval remain office-controlled.')}</p> : null}
     </section>
   )
 }
@@ -4501,6 +4505,7 @@ function CloseoutRegister({
 function FieldAssuranceWorkspace({
   field,
   jobs,
+  locale = 'en-GB',
   canCoordinate,
   canApprove,
   submitting,
@@ -4510,6 +4515,7 @@ function FieldAssuranceWorkspace({
   onOpenApprovals,
   onOpen,
 }) {
+  const t = (key, variables = {}) => operatorText(locale, key, variables)
   const rows = field?.jobs || field?.rows || EMPTY_LIST
   const summary = field?.summary || {}
   const targetFor = (item, action) => {
@@ -4518,87 +4524,87 @@ function FieldAssuranceWorkspace({
         type: 'incident',
         recordId: action.incidentId,
         record: item.latest?.incident,
-        label: 'Resolve incident',
+        label: t('Resolve incident'),
         status: 'resolved',
       },
       resolve_observation: {
         type: 'observation',
         recordId: action.observationId,
         record: item.latest?.observation,
-        label: 'Resolve observation',
+        label: t('Resolve observation'),
         status: 'resolved',
       },
-      review_rfi: { type: 'rfi', recordId: action.rfiId, record: item.latest?.rfi, label: 'Answer RFI', status: 'answered' },
+      review_rfi: { type: 'rfi', recordId: action.rfiId, record: item.latest?.rfi, label: t('Answer RFI'), status: 'answered' },
       review_submittal: {
         type: 'submittal',
         recordId: action.submittalId,
         record: item.latest?.submittal,
-        label: 'Approve submittal',
+        label: t('Approve submittal'),
         status: 'approved',
       },
       review_permit: {
         type: 'permit',
         recordId: action.permitId,
         record: item.latest?.permit,
-        label: 'Submit permit review',
+        label: t('Submit permit review'),
         status: 'submitted',
       },
       review_document: {
         type: 'document',
         recordId: action.documentId,
         record: item.latest?.document,
-        label: 'Approve document review',
+        label: t('Approve document review'),
         status: 'approved',
       },
       review_inspection: {
         type: 'inspection',
         recordId: action.inspectionId,
         record: item.latest?.inspection,
-        label: 'Request inspection sign-off',
+        label: t('Request inspection sign-off'),
         status: 'passed',
       },
       clear_site_access: {
         type: 'site_access',
         recordId: action.siteAccessId,
         record: item.latest?.siteAccess,
-        label: 'Clear site access',
+        label: t('Clear site access'),
         status: 'cleared',
       },
-      review_jha: { type: 'jha', recordId: action.jhaId, record: item.latest?.jha, label: 'Approve JHA', status: 'approved' },
-      request_sds: { type: 'sds', recordId: action.sdsSheetId, record: item.latest?.sdsSheet, label: 'Approve SDS', status: 'current' },
+      review_jha: { type: 'jha', recordId: action.jhaId, record: item.latest?.jha, label: t('Approve JHA'), status: 'approved' },
+      request_sds: { type: 'sds', recordId: action.sdsSheetId, record: item.latest?.sdsSheet, label: t('Approve SDS'), status: 'current' },
       complete_safety_meeting: {
         type: 'safety_meeting',
         recordId: action.safetyMeetingId,
         record: item.latest?.safetyMeeting,
-        label: 'Complete safety talk',
+        label: t('Complete safety talk'),
         status: 'completed',
       },
       complete_orientation: {
         type: 'orientation',
         recordId: action.orientationId,
         record: item.latest?.orientation,
-        label: 'Complete orientation',
+        label: t('Complete orientation'),
         status: 'completed',
       },
       complete_quality_review: {
         type: 'quality_check',
         recordId: action.qualityCheckId,
         record: item.latest?.qualityCheck,
-        label: 'Complete quality review',
+        label: t('Complete quality review'),
         status: 'passed',
       },
       complete_safety_check: {
         type: 'safety_check',
         recordId: action.safetyCheckId,
         record: item.latest?.safetyCheck,
-        label: 'Complete safety check',
+        label: t('Complete safety check'),
         status: 'completed',
       },
       resolve_punch_item: {
         type: 'punch_item',
         recordId: action.punchItemId,
         record: item.latest?.punchItem,
-        label: 'Resolve punch item',
+        label: t('Resolve punch item'),
         status: 'resolved',
       },
     }
@@ -4609,36 +4615,36 @@ function FieldAssuranceWorkspace({
     <div className="field-assurance-workspace" data-testid="field-assurance-workspace">
       <div className="assurance-heading">
         <div>
-          <h2>Assurance queue</h2>
-          <p>Safety, design, permit, inspection, quality, and evidence controls ranked from the retained ledger.</p>
+          <h2>{t('Assurance queue')}</h2>
+          <p>{t('Safety, design, permit, inspection, quality, and evidence controls ranked from the retained ledger.')}</p>
         </div>
         <span className="count-badge">{rows.length}</span>
       </div>
-      <div className="assurance-summary" aria-label="Field assurance summary">
+      <div className="assurance-summary" aria-label={t('Field assurance summary')}>
         <div>
-          <span>Incident blocked</span>
+          <span>{t('Incident blocked')}</span>
           <strong>{summary.incidentBlocked || 0}</strong>
         </div>
         <div>
-          <span>Design review</span>
+          <span>{t('Design review')}</span>
           <strong>{summary.designReviews || 0}</strong>
         </div>
         <div>
-          <span>Quality review</span>
+          <span>{t('Quality review')}</span>
           <strong>{summary.qualityReviews || 0}</strong>
         </div>
         <div>
-          <span>Evidence missing</span>
+          <span>{t('Evidence missing')}</span>
           <strong>{summary.evidenceMissing || 0}</strong>
         </div>
         <div>
-          <span>Production risk</span>
+          <span>{t('Production risk')}</span>
           <strong>{summary.productionAtRisk || 0}</strong>
         </div>
       </div>
       <div className="assurance-list">
         {rows.map((item) => {
-          const job = jobs.find((candidate) => candidate.id === item.jobId) || { id: item.jobId, title: item.jobTitle || 'Ledger job' }
+          const job = jobs.find((candidate) => candidate.id === item.jobId) || { id: item.jobId, title: item.jobTitle || t('Ledger job') }
           const canAct = canCoordinate && !item.flags?.approvalRequired
           const safetyAction = canAct ? item.nextActions?.find((action) => action.type === 'prepare_safety_pack') : null
           const accessPrerequisiteAction =
@@ -4655,16 +4661,16 @@ function FieldAssuranceWorkspace({
             <article className="assurance-item" key={item.jobId}>
               <div className="assurance-copy">
                 <div className="assurance-title">
-                  <h3>{item.jobTitle || 'Ledger job'}</h3>
-                  <span className={`status status-${item.fieldStatus}`}>{formatStatus(item.fieldStatus)}</span>
+                  <h3>{item.jobTitle || t('Ledger job')}</h3>
+                  <span className={`status status-${item.fieldStatus}`}>{t(formatStatus(item.fieldStatus))}</span>
                 </div>
-                <p>{item.nextAction || 'Field assurance records are stable.'}</p>
+                <p>{t(item.nextAction || 'Field assurance workflow is stable.')}</p>
                 <div className="assurance-values">
                   <span>
-                    Incidents <strong>{item.counts?.openIncidents || 0}</strong>
+                    {t('Incidents')} <strong>{item.counts?.openIncidents || 0}</strong>
                   </span>
                   <span>
-                    Design controls{' '}
+                    {t('Design controls')}{' '}
                     <strong>
                       {(item.counts?.openRfis || 0) +
                         (item.counts?.submittalReviews || 0) +
@@ -4673,7 +4679,7 @@ function FieldAssuranceWorkspace({
                     </strong>
                   </span>
                   <span>
-                    Quality controls{' '}
+                    {t('Quality controls')}{' '}
                     <strong>
                       {(item.counts?.inspectionReviews || 0) +
                         (item.counts?.openNonconformances || 0) +
@@ -4683,30 +4689,34 @@ function FieldAssuranceWorkspace({
                     </strong>
                   </span>
                   <span>
-                    Evidence <strong>{item.counts?.evidenceRecords || 0}</strong>
+                    {t('Evidence')} <strong>{item.counts?.evidenceRecords || 0}</strong>
                   </span>
                   <span>
-                    Production{' '}
+                    {t('Production')}{' '}
                     <strong>
                       {item.production?.summary?.performanceFactor == null
-                        ? item.production?.activeBaseline ? 'ready' : 'no baseline'
-                        : `${roundDisplay(item.production.summary.performanceFactor)} factor`}
+                        ? item.production?.activeBaseline ? t('ready') : t('no baseline')
+                        : t('{factor} factor', { factor: roundDisplay(item.production.summary.performanceFactor) })}
                     </strong>
                   </span>
                 </div>
                 <div className="assurance-flags">
                   {item.counts?.pendingApprovals ? (
                     <span className="tag tag-amber">
-                      {item.counts.pendingApprovals} approval{item.counts.pendingApprovals === 1 ? '' : 's'}
+                      {item.counts.pendingApprovals === 1
+                        ? t('{count} approval', { count: item.counts.pendingApprovals })
+                        : t('{count} approvals', { count: item.counts.pendingApprovals })}
                     </span>
                   ) : null}
-                  {item.flags?.safetyGap ? <span className="tag tag-amber">Safety pack missing</span> : null}
-                  {item.flags?.productionAtRisk ? <span className="tag tag-amber">Production variance</span> : null}
-                  {item.flags?.productionBaselineMissing ? <span className="tag">Production baseline missing</span> : null}
-                  {item.counts?.expiringPermits ? <span className="tag tag-amber">{item.counts.expiringPermits} permit due</span> : null}
+                  {item.flags?.safetyGap ? <span className="tag tag-amber">{t('Safety pack missing')}</span> : null}
+                  {item.flags?.productionAtRisk ? <span className="tag tag-amber">{t('Production variance')}</span> : null}
+                  {item.flags?.productionBaselineMissing ? <span className="tag">{t('Production baseline missing')}</span> : null}
+                  {item.counts?.expiringPermits ? <span className="tag tag-amber">{t('{count} permit due', { count: item.counts.expiringPermits })}</span> : null}
                   {item.counts?.siteAccessBlocks ? (
                     <span className="tag">
-                      {item.counts.siteAccessBlocks} access block{item.counts.siteAccessBlocks === 1 ? '' : 's'}
+                      {item.counts.siteAccessBlocks === 1
+                        ? t('{count} access block', { count: item.counts.siteAccessBlocks })
+                        : t('{count} access blocks', { count: item.counts.siteAccessBlocks })}
                     </span>
                   ) : null}
                 </div>
@@ -4725,24 +4735,24 @@ function FieldAssuranceWorkspace({
                     }
                   >
                     <ShieldCheck size={16} />
-                    Review approval
+                    {t('Review approval')}
                   </button>
                 ) : null}
                 {safetyAction ? (
                   <button
                     className="secondary-button"
-                    aria-label={`Prepare safety pack for ${job.title}`}
+                    aria-label={t('Prepare safety pack for {job}', { job: job.title })}
                     disabled={submitting}
                     onClick={() => onPrepareSafety(item)}
                   >
                     <PackageCheck size={16} />
-                    Safety pack
+                    {t('Safety pack')}
                   </button>
                 ) : null}
                 {reviewTarget?.recordId ? (
                   <button
                     className="secondary-button"
-                    aria-label={`${reviewTarget.label} for ${job.title}`}
+                    aria-label={t('{action} for {job}', { action: reviewTarget.label, job: job.title })}
                     disabled={submitting}
                     onClick={() => onReview(item, reviewTarget)}
                   >
@@ -4753,15 +4763,15 @@ function FieldAssuranceWorkspace({
                 {captureAction ? (
                   <button
                     className="secondary-button"
-                    aria-label={`Capture field evidence for ${job.title}`}
+                    aria-label={t('Capture field evidence for {job}', { job: job.title })}
                     disabled={submitting}
                     onClick={() => onCapture(item)}
                   >
                     <FileUp size={16} />
-                    Capture evidence
+                    {t('Capture evidence')}
                   </button>
                 ) : null}
-                <button className="icon-button table-action" aria-label={`Open ${job.title}`} onClick={() => onOpen(job)}>
+                <button className="icon-button table-action" aria-label={t('Open {job}', { job: job.title })} onClick={() => onOpen(job)}>
                   <ArrowUpRight size={16} />
                 </button>
               </div>
@@ -4770,8 +4780,8 @@ function FieldAssuranceWorkspace({
         })}
         {!rows.length ? (
           <Empty
-            title="Assurance queue is clear"
-            detail="Safety, design, quality, and evidence controls will appear here when review is required."
+            title={t('Assurance queue is clear')}
+            detail={t('Safety, design, quality, and evidence controls will appear here when review is required.')}
           />
         ) : null}
       </div>

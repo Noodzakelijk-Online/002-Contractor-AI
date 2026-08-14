@@ -1,6 +1,6 @@
 # UI Action Audit
 
-Audit date: 2026-08-09
+Audit date: 2026-08-14
 
 The product has one React/Vite operator application and one scoped React client
 portal. There is no alternate static dashboard. Actions call the canonical ledger
@@ -49,7 +49,10 @@ or operations APIs and expose explicit loading, disabled, empty, and error state
 - Business identity, material receiving, safety briefing, work permit, LMRA,
   environmental, expense, and daily-cycle forms keep the active job/draft stable
   during background refreshes and disable affected controls while loading.
-- The responsive production UI is exercised by 89 isolated Chromium tests across
+- Field assurance, NCR, and observation/incident controls now share the retained
+  operator locale, preserve operator evidence verbatim, expose localized governed
+  actions, and remain contained on narrow field-worker screens.
+- The responsive production UI is exercised by 95 isolated Chromium tests across
   desktop, mobile, owner, field-worker, office, approver, and client-portal flows.
 - The framework catalog renders 25 bounded rows per page with search, family and
   status filters; create, activation, history, and mobile containment are exercised
@@ -74,9 +77,10 @@ or operations APIs and expose explicit loading, disabled, empty, and error state
 ## Residual UX work
 
 - The operator shell and complete client portal provide persisted NL/EN switching;
-  dates, numbers, and EUR values follow the selected locale. Specialist operator
-  workspaces still contain English-only copy, so application-wide translation
-  remains incomplete.
+  dates, numbers, and EUR values follow the selected locale. The practical-core
+  field assurance, safety, quality, planning, commercial, and closeout chains are
+  bilingual, but some specialist operator workspaces still contain English-only
+  copy, so application-wide translation remains incomplete.
 - General draft autosave is not universal. Field offline capture has a dedicated
   queue; broad silent local caching would need privacy and conflict design.
 - Large lists do not all offer the same advanced filters and pagination.

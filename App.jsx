@@ -10890,7 +10890,7 @@ function App() {
 
   function openFieldReview(item, target) {
     if (!item?.jobId || !target?.recordId) {
-      setError('The assurance action is not linked to a retained ledger record.')
+      setError(ot('The assurance action is not linked to a retained ledger record.'))
       return
     }
     setFieldAction({ item, ...target })
@@ -10910,7 +10910,7 @@ function App() {
     event.preventDefault()
     const notes = fieldActionNotes.trim()
     if (!fieldAction?.item?.jobId || !fieldAction.recordId || !notes) {
-      setError('Record the review evidence before requesting this assurance transition.')
+      setError(ot('Record the review evidence before requesting this assurance transition.'))
       return
     }
     const requiresDate = ['permit', 'sds'].includes(fieldAction.type)
@@ -10919,13 +10919,13 @@ function App() {
     if (requiresDate && !fieldActionDate) {
       setError(
         fieldAction.type === 'sds'
-          ? 'Record the SDS expiry before requesting approval.'
-          : 'Record the proposed permit expiry before requesting approval.',
+          ? ot('Record the SDS expiry before requesting approval.')
+          : ot('Record the proposed permit expiry before requesting approval.'),
       )
       return
     }
     if (requiresReference && !reference) {
-      setError('Record the required attendance or document reference before requesting approval.')
+      setError(ot('Record the required attendance or document reference before requesting approval.'))
       return
     }
     const payload = {
@@ -10962,8 +10962,8 @@ function App() {
       )
       notify(
         result.approvalRequired
-          ? `${fieldAction.label} retained for approver review. No field reliance or external commitment was made.`
-          : `${fieldAction.label} recorded in the internal ledger.`,
+          ? ot('{action} retained for approver review. No field reliance or external commitment was made.', { action: fieldAction.label })
+          : ot('{action} recorded in the internal ledger.', { action: fieldAction.label }),
       )
       closeFieldReview()
       await refresh()
@@ -11751,19 +11751,20 @@ function App() {
               <section className="panel page-panel field-workspace" data-testid="field-workspace" aria-busy={loading || undefined}>
                 <div className="panel-heading">
                   <div>
-                    <h2>Field updates</h2>
-                    <p>Evidence, safety and quality assurance from the operating ledger.</p>
+                    <h2>{ot('Field updates')}</h2>
+                    <p>{ot('Evidence, safety and quality assurance from the operating ledger.')}</p>
                   </div>
                   <button className="secondary-button" onClick={() => selectSection('jobs')}>
                     <BriefcaseBusiness size={16} />
-                    Open jobs
+                    {ot('Open jobs')}
                   </button>
                 </div>
                 {!fieldScoped ? (
-                  <LazyControlBoundary label="field assurance controls">
+                  <LazyControlBoundary label={ot('field assurance controls')}>
                     <FieldAssuranceWorkspace
                       field={data.field}
                       jobs={jobs}
+                      locale={operatorLocale}
                       canCoordinate={canCoordinate}
                       canApprove={capabilities.approvals === true}
                       submitting={submitting}
@@ -11776,38 +11777,37 @@ function App() {
                   </LazyControlBoundary>
                 ) : null}
                 <div className="field-grid">
-                  <Metric icon={FolderArchive} label="Evidence stored" value={metrics.storedDocuments || 0} hint="Photos and documents" />
+                  <Metric icon={FolderArchive} label={ot('Evidence stored')} value={metrics.storedDocuments || 0} hint={ot('Photos and documents')} />
                   <Metric
                     icon={TriangleAlert}
-                    label="Open incidents"
+                    label={ot('Open incidents')}
                     value={metrics.openIncidents || 0}
-                    hint="Require a review"
+                    hint={ot('Require a review')}
                     tone="amber"
                   />
                   <Metric
                     icon={ShieldCheck}
-                    label="Safety checks"
+                    label={ot('Safety checks')}
                     value={metrics.safetyChecks || 0}
-                    hint="Ledger safety controls"
+                    hint={ot('Ledger safety controls')}
                     tone="green"
                   />
                 </div>
                 <div className="field-note">
                   <HardHat size={20} />
                   <div>
-                    <strong>Field records remain local and auditable.</strong>
+                    <strong>{ot('Field records remain local and auditable.')}</strong>
                     <p>
-                      Evidence, progress, time, and daily safety records use a bounded offline outbox. Exact retries are scoped to this
-                      operator and cannot create duplicate ledger entries.
+                      {ot('Evidence, progress, time, and daily safety records use a bounded offline outbox. Exact retries are scoped to this operator and cannot create duplicate ledger entries.')}
                     </p>
                   </div>
                   <div className="field-outbox-status" aria-live="polite">
                     {outboxPending ? (
-                      <span className="tag tag-amber">{outboxPending} queued</span>
+                      <span className="tag tag-amber">{ot('{count} queued', { count: outboxPending })}</span>
                     ) : (
-                      <span className="tag tag-green">Outbox clear</span>
+                      <span className="tag tag-green">{ot('Outbox clear')}</span>
                     )}
-                    {outboxQuarantined ? <span className="tag">{outboxQuarantined} other scope</span> : null}
+                    {outboxQuarantined ? <span className="tag">{ot('{count} other scope', { count: outboxQuarantined })}</span> : null}
                   </div>
                 </div>
                 <section className="attendance-control" data-testid="attendance-control">
@@ -15957,6 +15957,7 @@ function App() {
                   />
                   <NonconformanceControl
                     job={selectedJob}
+                    locale={operatorLocale}
                     canReport={canCoordinate || capabilities.fieldEvidence === true}
                     canCoordinate={canCoordinate}
                     canApprove={capabilities.approvals === true}
@@ -15970,6 +15971,7 @@ function App() {
                   />
                   <FieldRiskControl
                     job={selectedJob}
+                    locale={operatorLocale}
                     canReport={canCoordinate || capabilities.fieldEvidence === true}
                     canCoordinate={canCoordinate}
                     canApprove={capabilities.approvals === true}
@@ -19605,113 +19607,114 @@ function App() {
           >
             <div className="modal-heading">
               <div>
-                <p className="eyebrow">Retained assurance review</p>
+                <p className="eyebrow">{ot('Retained assurance review')}</p>
                 <h2 id="field-action-title">{fieldAction.label}</h2>
                 <p>
                   {fieldAction.item.jobTitle} /{' '}
                   {fieldAction.record?.title ||
                     fieldAction.record?.material ||
                     fieldAction.record?.workerName ||
-                    formatStatus(fieldAction.type)}
+                    ot(formatStatus(fieldAction.type))}
                 </p>
               </div>
-              <button className="icon-button" aria-label="Close assurance review" onClick={closeFieldReview}>
+              <button className="icon-button" aria-label={ot('Close assurance review')} onClick={closeFieldReview}>
                 <X size={18} />
               </button>
             </div>
             <form onSubmit={submitFieldReview}>
               <div className="form-grid">
                 <div className="field-record-context form-span">
-                  <span>Current state</span>
-                  <strong>{formatStatus(fieldAction.record?.status)}</strong>
+                  <span>{ot('Current state')}</span>
+                  <strong>{ot(formatStatus(fieldAction.record?.status))}</strong>
                   {fieldAction.record?.question ? <p>{fieldAction.record.question}</p> : null}
                   {fieldAction.record?.workerName ? (
                     <p>
-                      Worker: {fieldAction.record.workerName}
+                      {ot('Worker')}: {fieldAction.record.workerName}
                       {fieldAction.record.company ? ' / ' + fieldAction.record.company : ''}
                     </p>
                   ) : null}
                   {fieldAction.record?.hazards?.length ? (
                     <p>
-                      {fieldAction.record.hazards.length} hazard{fieldAction.record.hazards.length === 1 ? '' : 's'} retained with controls
-                      for review.
+                      {fieldAction.record.hazards.length === 1
+                        ? ot('{count} hazard retained with controls for review.', { count: fieldAction.record.hazards.length })
+                        : ot('{count} hazards retained with controls for review.', { count: fieldAction.record.hazards.length })}
                     </p>
                   ) : null}
                   {fieldAction.record?.defects?.length ? (
                     <p>
-                      {fieldAction.record.defects.length} retained defect{fieldAction.record.defects.length === 1 ? '' : 's'} require
-                      resolution evidence.
+                      {fieldAction.record.defects.length === 1
+                        ? ot('{count} retained defect requires resolution evidence.', { count: fieldAction.record.defects.length })
+                        : ot('{count} retained defects require resolution evidence.', { count: fieldAction.record.defects.length })}
                     </p>
                   ) : null}
-                  {fieldAction.record?.expiresAt ? <p>Current expiry: {formatDate(fieldAction.record.expiresAt)}</p> : null}
+                  {fieldAction.record?.expiresAt ? <p>{ot('Current expiry')}: {formatDate(fieldAction.record.expiresAt)}</p> : null}
                 </div>
                 {['permit', 'sds'].includes(fieldAction.type) ? (
                   <label>
-                    {fieldAction.type === 'sds' ? 'SDS expiry' : 'Proposed expiry'}
+                    {fieldAction.type === 'sds' ? ot('SDS expiry') : ot('Proposed expiry')}
                     <input required type="date" value={fieldActionDate} onChange={(event) => setFieldActionDate(event.target.value)} />
                   </label>
                 ) : null}
                 {fieldAction.type === 'sds' ? (
                   <label className="form-span">
-                    SDS document reference
+                    {ot('SDS document reference')}
                     <input
                       required
                       value={fieldActionReference}
                       onChange={(event) => setFieldActionReference(event.target.value)}
-                      placeholder="Storage reference, controlled document ID, or verified source"
+                      placeholder={ot('Storage reference, controlled document ID, or verified source')}
                     />
                   </label>
                 ) : null}
                 {fieldAction.type === 'safety_meeting' ? (
                   <label className="form-span">
-                    Attendees
+                    {ot('Attendees')}
                     <input
                       required
                       value={fieldActionReference}
                       onChange={(event) => setFieldActionReference(event.target.value)}
-                      placeholder="Names or retained attendance reference"
+                      placeholder={ot('Names or retained attendance reference')}
                     />
                   </label>
                 ) : null}
                 {fieldAction.type === 'orientation' ? (
                   <label className="form-span">
-                    Verification reference
+                    {ot('Verification reference')}
                     <input
                       required
                       value={fieldActionReference}
                       onChange={(event) => setFieldActionReference(event.target.value)}
-                      placeholder="Induction record, credential, or checked evidence reference"
+                      placeholder={ot('Induction record, credential, or checked evidence reference')}
                     />
                   </label>
                 ) : null}
                 {fieldAction.type === 'document' ? (
                   <label className="form-span">
-                    Document review reference
+                    {ot('Document review reference')}
                     <input
                       required
                       value={fieldActionReference}
                       onChange={(event) => setFieldActionReference(event.target.value)}
-                      placeholder="Controlled document revision, reviewer record, or storage reference"
+                      placeholder={ot('Controlled document revision, reviewer record, or storage reference')}
                     />
                   </label>
                 ) : null}
                 <label className="form-span">
-                  {fieldAction.type === 'rfi' ? 'Response and evidence' : 'Evidence and decision'}
+                  {fieldAction.type === 'rfi' ? ot('Response and evidence') : ot('Evidence and decision')}
                   <textarea
                     required
                     value={fieldActionNotes}
                     onChange={(event) => setFieldActionNotes(event.target.value)}
-                    placeholder="Record the source, inspection, corrective work, or decision evidence an approver should rely on."
+                    placeholder={ot('Record the source, inspection, corrective work, or decision evidence an approver should rely on.')}
                   />
                 </label>
                 <p className="workflow-note form-span">
-                  This records a proposed lifecycle transition. Field reliance, acceptance, publication, and external commitments remain
-                  blocked until the approval is resolved.
+                  {ot('This records a proposed lifecycle transition. Field reliance, acceptance, publication, and external commitments remain blocked until the approval is resolved.')}
                 </p>
               </div>
               <div className="modal-actions">
                 <button type="button" className="secondary-button" onClick={closeFieldReview}>
-                  Cancel
+                  {ot('Cancel')}
                 </button>
                 <button
                   className="primary-button"
@@ -19723,7 +19726,7 @@ function App() {
                   }
                 >
                   <ShieldCheck size={16} />
-                  {submitting ? 'Recording...' : 'Request approver review'}
+                  {submitting ? ot('Recording...') : ot('Request approver review')}
                 </button>
               </div>
             </form>

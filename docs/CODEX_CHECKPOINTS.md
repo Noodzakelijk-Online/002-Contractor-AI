@@ -3,6 +3,22 @@
 This file is a compact resume boundary. A future implementation pass should verify
 the repository rather than treating these statements as current by assumption.
 
+## CP-20 Bilingual field assurance and risk control
+
+- Locale wiring: persisted operator locale reaches the field page, assurance queue,
+  NCR register, observation/incident register, and assurance review dialog.
+- Retained data: job, worker, evidence, title, fact, containment, correction, and
+  verification text remains verbatim across NL/EN changes; only controlled labels,
+  enums, recommendations, and validation outcomes are translated.
+- Browser evidence: a Dutch observation survives reload, the assurance queue and
+  review dialog render localized server actions, an English round trip preserves
+  the retained API evidence, and the narrow field workspace has no overflow.
+- Catalog: 2,705 unique specialist translation keys, zero duplicate keys, and the
+  catalog remains lazy-loaded outside the English startup path.
+- Verification: 10 frontend tests, 534 Node tests, 95 Chromium workflows in 24
+  isolated batches, release/HAI/lint/build/bundle, production benchmark, hardened
+  container, and Node 22.23.2 Windows standalone gates pass.
+
 ## CP-19 Bilingual setup and critical-path planning
 
 - Locale wiring: persisted operator locale reaches job setup coverage and work-plan

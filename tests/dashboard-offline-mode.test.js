@@ -42,11 +42,17 @@ test('large navigation and job controls are loaded through local suspense bounda
   assert.match(dashboardRootSource, /<ProjectControls[\s\S]*locale=\{operatorLocale\}/);
   assert.match(dashboardRootSource, /<CapabilitySetupControl[\s\S]*locale=\{operatorLocale\}/);
   assert.match(dashboardRootSource, /<WorkPlanControl[\s\S]*locale=\{operatorLocale\}/);
+  assert.match(dashboardRootSource, /<FieldAssuranceWorkspace[\s\S]*locale=\{operatorLocale\}/);
+  assert.match(dashboardRootSource, /<NonconformanceControl[\s\S]*locale=\{operatorLocale\}/);
+  assert.match(dashboardRootSource, /<FieldRiskControl[\s\S]*locale=\{operatorLocale\}/);
   assert.match(dashboardSource, /function ResourcesWorkspace\(\{[\s\S]*locale = 'en-GB'/);
   assert.match(dashboardSource, /function AuditHistory\(\{ locale = 'en-GB'/);
   assert.match(dashboardSource, /function ProjectControls\(\{[\s\S]*locale = 'en-GB'/);
   assert.match(dashboardSource, /function CapabilitySetupControl\(\{ job, locale = 'en-GB'/);
   assert.match(dashboardSource, /function WorkPlanControl\(\{[\s\S]*locale = 'en-GB'/);
+  assert.match(dashboardSource, /function FieldAssuranceWorkspace\(\{[\s\S]*locale = 'en-GB'/);
+  assert.match(dashboardSource, /function NonconformanceControl\(\{[\s\S]*locale = 'en-GB'/);
+  assert.match(dashboardSource, /function FieldRiskControl\(\{[\s\S]*locale = 'en-GB'/);
   assert.match(dashboardRootSource, /<LazyControlBoundary label="client controls">/);
   assert.match(dashboardRootSource, /<LazyControlBoundary label="automation controls">/);
   assert.match(dashboardRootSource, /<LazyControlBoundary label=\{ot\('job controls'\)\} mode="job">/);

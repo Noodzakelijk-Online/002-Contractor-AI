@@ -1,5 +1,26 @@
 # Codex Worklog
 
+## 2026-08-14 - Field assurance and incident bilingual pass
+
+- Passed the retained operator locale through the Field workspace, field-assurance
+  queue, NCR register, observation/incident register, and assurance review dialog.
+- Localized forms, categories, statuses, metrics, recommendations, safeguards,
+  validation outcomes, action labels, and accessible names while preserving job,
+  worker, evidence, title, fact, containment, correction, and verification text.
+- Added a Dutch observation persistence and English round-trip browser workflow,
+  review-dialog interaction, retained API evidence assertions, mobile containment,
+  component translation contracts, and static locale-wiring guards.
+- In-app Browser QA found and fixed an untranslated lowercase quality category,
+  then confirmed reload persistence, translated server-owned assurance actions,
+  exact desktop/mobile containment, and an empty console error log.
+- Current-source gates pass: 10 frontend tests, 534 Node tests (498 passed and 36
+  PostgreSQL/environment skips) in 78.6 seconds, all 95 Chromium workflows in 24
+  isolated batches, 2,705 unique specialist translation keys, release/HAI/lint/
+  build/bundle at 438,874 total gzip bytes, the production benchmark, hardened
+  container, and Node 22.23.2 Windows standalone verification.
+
+## 2026-08-14 - Quality and closeout bilingual pass
+
 - Localized the governed quality and closeout chain in Dutch and English:
   before/during/after photo evidence, installation and quality-control inspection
   checklists, punch items, warranty claims, aftercare, client feedback, handover,
