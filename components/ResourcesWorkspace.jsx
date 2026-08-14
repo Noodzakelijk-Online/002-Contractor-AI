@@ -39,7 +39,14 @@ import Empty from './EmptyState'
 import FiveSWorkspace from './FiveSWorkspace'
 import { operatorText } from '../operator-locale'
 
-function WorkerDirectory({ workers, summary, canCoordinate, canApprove, submitting, onCreate, onEdit, onRetire, onOpenApprovals }) {
+function identityText(key, variables = {}) {
+  return Object.entries(variables).reduce(
+    (text, [name, value]) => text.replaceAll(`{${name}}`, String(value)),
+    key,
+  )
+}
+
+function WorkerDirectory({ t = identityText, workers, summary, canCoordinate, canApprove, submitting, onCreate, onEdit, onRetire, onOpenApprovals }) {
   const [query, setQuery] = useState('')
   const [filter, setFilter] = useState('active')
   const visibleWorkers = useMemo(() => {
@@ -64,31 +71,31 @@ function WorkerDirectory({ workers, summary, canCoordinate, canApprove, submitti
 
   return (
     <div className="trade-partner-directory worker-directory" data-testid="worker-directory" role="tabpanel">
-      <div className="resource-summary worker-summary" aria-label="Crew summary">
+      <div className="resource-summary worker-summary" aria-label={t('Crew summary')}>
         <div>
-          <span>Active crew</span>
+          <span>{t('Active crew')}</span>
           <strong>{summary?.active || 0}</strong>
         </div>
         <div>
-          <span>Available</span>
+          <span>{t('Available')}</span>
           <strong>{summary?.available || 0}</strong>
         </div>
         <div>
-          <span>Unavailable</span>
+          <span>{t('Unavailable')}</span>
           <strong>{summary?.unavailable || 0}</strong>
         </div>
         <div>
-          <span>Retirement review</span>
+          <span>{t('Retirement review')}</span>
           <strong>{summary?.pendingRetirement || 0}</strong>
         </div>
       </div>
       <div className="trade-partner-toolbar worker-toolbar">
         <label className="search-control">
           <Search size={16} />
-          <span className="visually-hidden">Search crew directory</span>
-          <input type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search crew" />
+          <span className="visually-hidden">{t('Search crew directory')}</span>
+          <input type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t('Search crew')} />
         </label>
-        <div className="resource-tabs" role="tablist" aria-label="Crew status">
+        <div className="resource-tabs" role="tablist" aria-label={t('Crew status')}>
           {[
             ['active', 'Active'],
             ['unavailable', 'Unavailable'],
@@ -108,7 +115,7 @@ function WorkerDirectory({ workers, summary, canCoordinate, canApprove, submitti
         {canCoordinate ? (
           <button className="primary-button" disabled={submitting} onClick={onCreate}>
             <Plus size={16} />
-            Add crew member
+            {t('Add crew member')}
           </button>
         ) : null}
       </div>
@@ -123,31 +130,31 @@ function WorkerDirectory({ workers, summary, canCoordinate, canApprove, submitti
                 <div className="trade-partner-title worker-title">
                   <h3>{worker.name}</h3>
                   <span className={`status status-${worker.status}`}>{formatStatus(worker.status)}</span>
-                  {worker.retirementApprovalId ? <span className="tag tag-amber">Retirement pending</span> : null}
+                  {worker.retirementApprovalId ? <span className="tag tag-amber">{t('Retirement pending')}</span> : null}
                 </div>
                 <p>
-                  {worker.role || 'Role not retained'}
+                  {worker.role || t('Role not retained')}
                   {worker.skills?.length ? ` / ${worker.skills.slice(0, 3).join(', ')}` : ''}
                 </p>
-                <small>{worker.email || worker.phone || 'Contact not retained'}</small>
+                <small>{worker.email || worker.phone || t('Contact not retained')}</small>
               </div>
             </div>
             <div className="trade-partner-evidence worker-details">
               <span>
-                Home region <strong>{worker.homeRegion || 'Not retained'}</strong>
+                {t('Home region')} <strong>{worker.homeRegion || t('Not retained')}</strong>
               </span>
               <span>
-                Hourly cost <strong>{currency.format(worker.hourlyRate || 0)}</strong>
+                {t('Hourly cost')} <strong>{currency.format(worker.hourlyRate || 0)}</strong>
               </span>
               <span>
-                Active assignments <strong>{worker.activeAssignmentCount || 0}</strong>
+                {t('Active assignments')} <strong>{worker.activeAssignmentCount || 0}</strong>
               </span>
               <span>
-                Last updated <strong>{formatDate(worker.updatedAt)}</strong>
+                {t('Last updated')} <strong>{formatDate(worker.updatedAt)}</strong>
               </span>
               {worker.dormantAssignmentCount ? (
                 <span>
-                  Dormant assignments <strong>{worker.dormantAssignmentCount}</strong>
+                  {t('Dormant assignments')} <strong>{worker.dormantAssignmentCount}</strong>
                 </span>
               ) : null}
             </div>
@@ -159,18 +166,18 @@ function WorkerDirectory({ workers, summary, canCoordinate, canApprove, submitti
                   onClick={() => onOpenApprovals({ approvalId: worker.retirementApprovalId })}
                 >
                   <ShieldCheck size={15} />
-                  Review retirement
+                  {t('Review retirement')}
                 </button>
               ) : null}
               {canCoordinate && worker.status !== 'retired' ? (
-                <button className="icon-button" aria-label={`Edit ${worker.name}`} disabled={submitting} onClick={() => onEdit(worker)}>
+                <button className="icon-button" aria-label={t('Edit {name}', { name: worker.name })} disabled={submitting} onClick={() => onEdit(worker)}>
                   <Pencil size={16} />
                 </button>
               ) : null}
               {canCoordinate && worker.status !== 'retired' ? (
                 <button
                   className="icon-button danger-icon"
-                  aria-label={`Request retirement for ${worker.name}`}
+                  aria-label={t('Request retirement for {name}', { name: worker.name })}
                   disabled={submitting || Boolean(worker.retirementApprovalId)}
                   onClick={() => onRetire(worker)}
                 >
@@ -181,14 +188,14 @@ function WorkerDirectory({ workers, summary, canCoordinate, canApprove, submitti
           </article>
         ))}
         {!visibleWorkers.length ? (
-          <Empty title="No matching crew members" detail="Retained people records matching this view will appear here." />
+          <Empty title={t('No matching crew members')} detail={t('Retained people records matching this view will appear here.')} />
         ) : null}
       </div>
     </div>
   )
 }
 
-function QualificationWorkspace({ register, workers, canCoordinate, canApprove, submitting, onAddCredential, onCreateRequirement, onRetireRequirement, onOpenApprovals, onOpenJob }) {
+function QualificationWorkspace({ t = identityText, register, workers, canCoordinate, canApprove, submitting, onAddCredential, onCreateRequirement, onRetireRequirement, onOpenApprovals, onOpenJob }) {
   const [query, setQuery] = useState('')
   const [filter, setFilter] = useState('all')
   const workerRows = register?.workers?.length
@@ -212,19 +219,19 @@ function QualificationWorkspace({ register, workers, canCoordinate, canApprove, 
 
   return (
     <div className="qualification-workspace" role="tabpanel" data-testid="qualification-workspace">
-      <div className="resource-summary qualification-summary" aria-label="Qualification summary">
-        <div><span>Credentialed workers</span><strong>{summary.workersWithApprovedCredentials || 0}</strong></div>
-        <div><span>Pending review</span><strong>{summary.pendingCredentials || 0}</strong></div>
-        <div><span>Expiring / expired</span><strong>{(summary.expiringCredentials || 0) + (summary.expiredCredentials || 0)}</strong></div>
-        <div><span>Blocked assignments</span><strong>{summary.blockedAssignments || 0}</strong></div>
+      <div className="resource-summary qualification-summary" aria-label={t('Qualification summary')}>
+        <div><span>{t('Credentialed workers')}</span><strong>{summary.workersWithApprovedCredentials || 0}</strong></div>
+        <div><span>{t('Pending review')}</span><strong>{summary.pendingCredentials || 0}</strong></div>
+        <div><span>{t('Expiring / expired')}</span><strong>{(summary.expiringCredentials || 0) + (summary.expiredCredentials || 0)}</strong></div>
+        <div><span>{t('Blocked assignments')}</span><strong>{summary.blockedAssignments || 0}</strong></div>
       </div>
       <div className="qualification-toolbar">
         <label className="search-control">
           <Search size={16} />
-          <span className="visually-hidden">Search workforce qualifications</span>
-          <input type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search worker or credential" />
+          <span className="visually-hidden">{t('Search workforce qualifications')}</span>
+          <input type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t('Search worker or credential')} />
         </label>
-        <div className="resource-tabs" role="tablist" aria-label="Credential state">
+        <div className="resource-tabs" role="tablist" aria-label={t('Credential state')}>
           {[
             ['all', 'All'],
             ['current', 'Current'],
@@ -233,14 +240,14 @@ function QualificationWorkspace({ register, workers, canCoordinate, canApprove, 
             ['missing', 'Missing'],
           ].map(([key, label]) => (
             <button key={key} role="tab" aria-selected={filter === key} className={filter === key ? 'resource-tab-active' : ''} onClick={() => setFilter(key)}>
-              {label}
+              {t(label)}
             </button>
           ))}
         </div>
         {canCoordinate ? (
           <button type="button" className="primary-button" disabled={submitting} onClick={onCreateRequirement}>
             <Plus size={16} />
-            Add job requirement
+            {t('Add job requirement')}
           </button>
         ) : null}
       </div>
@@ -248,10 +255,10 @@ function QualificationWorkspace({ register, workers, canCoordinate, canApprove, 
       <section className="qualification-band" aria-labelledby="worker-credential-heading">
         <div className="qualification-band-heading">
           <div>
-            <h3 id="worker-credential-heading">Worker credentials</h3>
-            <p>Only approved, integrity-valid evidence satisfies job readiness. Pending revisions do not replace the current approved source.</p>
+            <h3 id="worker-credential-heading">{t('Worker credentials')}</h3>
+            <p>{t('Only approved, integrity-valid evidence satisfies job readiness. Pending revisions do not replace the current approved source.')}</p>
           </div>
-          <span>{visibleWorkers.length} worker{visibleWorkers.length === 1 ? '' : 's'}</span>
+          <span>{t(visibleWorkers.length === 1 ? '{count} worker' : '{count} workers', { count: visibleWorkers.length })}</span>
         </div>
         <div className="qualification-worker-list">
           {visibleWorkers.map((row) => {
@@ -268,7 +275,7 @@ function QualificationWorkspace({ register, workers, canCoordinate, canApprove, 
                       <h4>{worker.name}</h4>
                       <span className={`status status-${qualification.status || 'missing'}`}>{formatStatus(qualification.status || 'missing')}</span>
                     </div>
-                    <p>{worker.role || 'Role not retained'} / {worker.activeAssignmentCount || 0} active assignment{worker.activeAssignmentCount === 1 ? '' : 's'}</p>
+                    <p>{worker.role || t('Role not retained')} / {t(worker.activeAssignmentCount === 1 ? '{count} active assignment' : '{count} active assignments', { count: worker.activeAssignmentCount || 0 })}</p>
                   </div>
                 </div>
                 <div className="credential-list">
@@ -276,40 +283,40 @@ function QualificationWorkspace({ register, workers, canCoordinate, canApprove, 
                     <div className="credential-line" key={credential.id}>
                       <span className={`credential-state credential-state-${credential.status}`}>{formatStatus(credential.status)}</span>
                       <strong>{credential.title}</strong>
-                      <span>{credential.issuer || 'Issuer not retained'}</span>
-                      <span>{credential.expiresOn ? `Expires ${formatDate(credential.expiresOn)}` : 'No expiry retained'}</span>
+                      <span>{credential.issuer || t('Issuer not retained')}</span>
+                      <span>{credential.expiresOn ? t('Expires {date}', { date: formatDate(credential.expiresOn) }) : t('No expiry retained')}</span>
                     </div>
                   ))}
-                  {!credentials.length ? <span className="qualification-empty">No current or pending credential evidence.</span> : null}
+                  {!credentials.length ? <span className="qualification-empty">{t('No current or pending credential evidence.')}</span> : null}
                 </div>
                 <div className="qualification-row-actions">
                   {pending && canApprove ? (
                     <button type="button" className="secondary-button" disabled={submitting} onClick={() => onOpenApprovals({ approvalId: pending.approvalId })}>
                       <ClipboardCheck size={15} />
-                      Review
+                      {t('Review')}
                     </button>
                   ) : null}
                   {canCoordinate && worker.status !== 'retired' ? (
                     <button type="button" className="secondary-button" disabled={submitting} onClick={() => onAddCredential(worker)}>
                       <Plus size={15} />
-                      {qualification.approved ? 'Add revision' : 'Add evidence'}
+                      {t(qualification.approved ? 'Add revision' : 'Add evidence')}
                     </button>
                   ) : null}
                 </div>
               </article>
             )
           })}
-          {!visibleWorkers.length ? <Empty title="No matching qualification records" detail="Workers matching this credential state will appear here." /> : null}
+          {!visibleWorkers.length ? <Empty title={t('No matching qualification records')} detail={t('Workers matching this credential state will appear here.')} /> : null}
         </div>
       </section>
 
       <section className="qualification-band qualification-requirement-band" aria-labelledby="job-requirement-heading">
         <div className="qualification-band-heading">
           <div>
-            <h3 id="job-requirement-heading">Job requirements</h3>
-            <p>Requirements apply to assigned roles and remain enforced while a retirement decision is pending.</p>
+            <h3 id="job-requirement-heading">{t('Job requirements')}</h3>
+            <p>{t('Requirements apply to assigned roles and remain enforced while a retirement decision is pending.')}</p>
           </div>
-          <span>{requirements.length} active requirement{requirements.length === 1 ? '' : 's'}</span>
+          <span>{t(requirements.length === 1 ? '{count} active requirement' : '{count} active requirements', { count: requirements.length })}</span>
         </div>
         <div className="qualification-requirement-list">
           {requirements.map((requirement) => {
@@ -324,24 +331,24 @@ function QualificationWorkspace({ register, workers, canCoordinate, canApprove, 
                   <p>{requirement.jobTitle || job?.jobTitle || requirement.jobId}</p>
                 </div>
                 <div className="qualification-requirement-values">
-                  <span>Type <strong>{requirement.credentialLabel}</strong></span>
-                  <span>Role <strong>{requirement.roleKey === '*' ? 'All assigned roles' : formatStatus(requirement.roleKey)}</strong></span>
-                  <span>Readiness <strong>{job ? `${job.readyAssignments} ready / ${job.blockedAssignments} blocked` : 'No active job row'}</strong></span>
+                  <span>{t('Type')} <strong>{requirement.credentialLabel}</strong></span>
+                  <span>{t('Role')} <strong>{requirement.roleKey === '*' ? t('All assigned roles') : formatStatus(requirement.roleKey)}</strong></span>
+                  <span>{t('Readiness')} <strong>{job ? t('{ready} ready / {blocked} blocked', { ready: job.readyAssignments, blocked: job.blockedAssignments }) : t('No active job row')}</strong></span>
                 </div>
                 <div className="qualification-row-actions">
                   {requirement.retirementApprovalId && canApprove ? (
                     <button type="button" className="secondary-button" disabled={submitting} onClick={() => onOpenApprovals({ approvalId: requirement.retirementApprovalId, jobId: requirement.jobId, jobTitle: requirement.jobTitle })}>
                       <ClipboardCheck size={15} />
-                      Review removal
+                      {t('Review removal')}
                     </button>
                   ) : null}
                   {onOpenJob ? (
-                    <button type="button" className="icon-button" aria-label={`Open ${requirement.jobTitle || 'job'}`} onClick={() => onOpenJob({ id: requirement.jobId })}>
+                    <button type="button" className="icon-button" aria-label={t('Open {name}', { name: requirement.jobTitle || t('job') })} onClick={() => onOpenJob({ id: requirement.jobId })}>
                       <ArrowUpRight size={16} />
                     </button>
                   ) : null}
                   {canCoordinate && requirement.status === 'active' ? (
-                    <button type="button" className="icon-button danger-icon" aria-label={`Request removal of ${requirement.title}`} disabled={submitting} onClick={() => onRetireRequirement(requirement)}>
+                    <button type="button" className="icon-button danger-icon" aria-label={t('Request removal of {name}', { name: requirement.title })} disabled={submitting} onClick={() => onRetireRequirement(requirement)}>
                       <Archive size={16} />
                     </button>
                   ) : null}
@@ -349,14 +356,14 @@ function QualificationWorkspace({ register, workers, canCoordinate, canApprove, 
               </article>
             )
           })}
-          {!requirements.length ? <Empty title="No qualification requirements" detail="Add a job requirement before dispatch when a role needs VCA, GPI, equipment, electrical, or other retained proof." /> : null}
+          {!requirements.length ? <Empty title={t('No qualification requirements')} detail={t('Add a job requirement before dispatch when a role needs VCA, GPI, equipment, electrical, or other retained proof.')} /> : null}
         </div>
       </section>
     </div>
   )
 }
 
-function AvailabilityWorkspace({ register, workers, canCoordinate, canApprove, submitting, onCreate, onCancel, onOpenApprovals }) {
+function AvailabilityWorkspace({ t = identityText, register, workers, canCoordinate, canApprove, submitting, onCreate, onCancel, onOpenApprovals }) {
   const [query, setQuery] = useState('')
   const [filter, setFilter] = useState('all')
   const periods = register?.periods || EMPTY_LIST
@@ -392,20 +399,20 @@ function AvailabilityWorkspace({ register, workers, canCoordinate, canApprove, s
 
   return (
     <div className="availability-workspace" role="tabpanel" data-testid="availability-workspace">
-      <div className="resource-summary availability-summary" aria-label="Worker availability summary">
-        <div><span>Active periods</span><strong>{summary.activePeriods || 0}</strong></div>
-        <div><span>Unavailable now</span><strong>{summary.currentUnavailable || 0}</strong></div>
-        <div><span>Upcoming</span><strong>{summary.upcoming || 0}</strong></div>
-        <div><span>Cancellation review</span><strong>{summary.pendingCancellation || 0}</strong></div>
-        <div><span>Assignment conflicts</span><strong>{summary.assignmentConflicts || 0}</strong></div>
+      <div className="resource-summary availability-summary" aria-label={t('Worker availability summary')}>
+        <div><span>{t('Active periods')}</span><strong>{summary.activePeriods || 0}</strong></div>
+        <div><span>{t('Unavailable now')}</span><strong>{summary.currentUnavailable || 0}</strong></div>
+        <div><span>{t('Upcoming')}</span><strong>{summary.upcoming || 0}</strong></div>
+        <div><span>{t('Cancellation review')}</span><strong>{summary.pendingCancellation || 0}</strong></div>
+        <div><span>{t('Assignment conflicts')}</span><strong>{summary.assignmentConflicts || 0}</strong></div>
       </div>
       <div className="availability-toolbar">
         <label className="search-control">
           <Search size={16} />
-          <span className="visually-hidden">Search worker availability</span>
-          <input type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search worker or period" />
+          <span className="visually-hidden">{t('Search worker availability')}</span>
+          <input type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t('Search worker or period')} />
         </label>
-        <div className="resource-tabs" role="tablist" aria-label="Availability state">
+        <div className="resource-tabs" role="tablist" aria-label={t('Availability state')}>
           {[
             ['all', 'All'],
             ['current', 'Current'],
@@ -414,20 +421,20 @@ function AvailabilityWorkspace({ register, workers, canCoordinate, canApprove, s
             ['conflict', 'Conflicts'],
           ].map(([key, label]) => (
             <button key={key} role="tab" aria-selected={filter === key} className={filter === key ? 'resource-tab-active' : ''} onClick={() => setFilter(key)}>
-              {label}
+              {t(label)}
             </button>
           ))}
         </div>
         {canCoordinate ? (
           <button type="button" className="primary-button" disabled={submitting || !workers?.length} onClick={() => onCreate()}>
             <Plus size={16} />
-            Add unavailability
+            {t('Add unavailability')}
           </button>
         ) : null}
       </div>
       <div className="availability-policy">
         <LockKeyhole size={16} />
-        <p>Operational capacity only. Do not retain diagnosis, illness, HR case, payroll entitlement, or location tracking data.</p>
+        <p>{t('Operational capacity only. Do not retain diagnosis, illness, HR case, payroll entitlement, or location tracking data.')}</p>
       </div>
       <div className="availability-list">
         {visiblePeriods.map((period) => {
@@ -441,27 +448,27 @@ function AvailabilityWorkspace({ register, workers, canCoordinate, canApprove, s
                   <div className="availability-title-line">
                     <h3>{period.workerName}</h3>
                     <span className={`status status-${displayState}`}>{formatStatus(displayState)}</span>
-                    {conflicts.length ? <span className="tag tag-red">{conflicts.length} conflict{conflicts.length === 1 ? '' : 's'}</span> : null}
+                    {conflicts.length ? <span className="tag tag-red">{t(conflicts.length === 1 ? '{count} conflict' : '{count} conflicts', { count: conflicts.length })}</span> : null}
                   </div>
-                  <p>{period.workerRole || 'Role not retained'} / {period.periodLabel}</p>
+                  <p>{period.workerRole || t('Role not retained')} / {period.periodLabel}</p>
                 </div>
               </div>
               <div className="availability-window">
                 <strong>{period.title}</strong>
-                <span>{formatDateTime(period.startsAt)} to {formatDateTime(period.endsAt)}</span>
+                <span>{t('{start} to {end}', { start: formatDateTime(period.startsAt), end: formatDateTime(period.endsAt) })}</span>
                 {period.data?.operationalNotes ? <small>{period.data.operationalNotes}</small> : null}
               </div>
               <div className="availability-actions">
                 {period.status === 'pending_cancellation' && canApprove && period.cancellationApprovalId ? (
                   <button type="button" className="secondary-button" disabled={submitting} onClick={() => onOpenApprovals({ approvalId: period.cancellationApprovalId })}>
                     <ClipboardCheck size={15} />
-                    Review cancellation
+                    {t('Review cancellation')}
                   </button>
                 ) : null}
                 {period.status === 'active' && canCoordinate ? (
                   <button type="button" className="secondary-button" disabled={submitting} onClick={() => onCancel(period)}>
                     <Ban size={15} />
-                    Request cancellation
+                    {t('Request cancellation')}
                   </button>
                 ) : null}
               </div>
@@ -470,8 +477,8 @@ function AvailabilityWorkspace({ register, workers, canCoordinate, canApprove, s
         })}
         {!visiblePeriods.length ? (
           <Empty
-            title="No matching availability periods"
-            detail="Time-bounded operational unavailability will appear here and participate in scheduling immediately."
+            title={t('No matching availability periods')}
+            detail={t('Time-bounded operational unavailability will appear here and participate in scheduling immediately.')}
           />
         ) : null}
       </div>
@@ -480,6 +487,7 @@ function AvailabilityWorkspace({ register, workers, canCoordinate, canApprove, s
 }
 
 function EquipmentDirectory({
+  t = identityText,
   tools,
   summary,
   custody,
@@ -530,36 +538,36 @@ function EquipmentDirectory({
 
   return (
     <div className="trade-partner-directory equipment-directory" data-testid="equipment-directory" role="tabpanel">
-      <div className="resource-summary equipment-summary" aria-label="Equipment summary">
+      <div className="resource-summary equipment-summary" aria-label={t('Equipment summary')}>
         <div>
-          <span>Active equipment</span>
+          <span>{t('Active equipment')}</span>
           <strong>{summary?.active || 0}</strong>
         </div>
         <div>
-          <span>Available</span>
+          <span>{t('Available')}</span>
           <strong>{summary?.available || 0}</strong>
         </div>
         <div>
-          <span>Attention</span>
+          <span>{t('Attention')}</span>
           <strong>{summary?.attention || 0}</strong>
         </div>
         <div>
-          <span>Checked out</span>
+          <span>{t('Checked out')}</span>
           <strong>{custody?.summary?.checkedOut || 0}</strong>
         </div>
       </div>
       <section className="equipment-custody-register" data-testid="equipment-custody-register">
         <div className="qualification-band-heading">
           <div>
-            <h3>Physical custody</h3>
-            <p>Every yard-to-crew handoff has one custodian, return deadline, condition record, and retained evidence reference.</p>
+            <h3>{t('Physical custody')}</h3>
+            <p>{t('Every yard-to-crew handoff has one custodian, return deadline, condition record, and retained evidence reference.')}</p>
           </div>
           <div className="equipment-custody-heading-actions">
-            {custody?.summary?.overdue ? <span className="tag tag-amber">{custody.summary.overdue} overdue</span> : null}
-            {custody?.summary?.exceptions ? <span className="tag tag-red">{custody.summary.exceptions} quarantined</span> : null}
+            {custody?.summary?.overdue ? <span className="tag tag-amber">{t('{count} overdue', { count: custody.summary.overdue })}</span> : null}
+            {custody?.summary?.exceptions ? <span className="tag tag-red">{t('{count} quarantined', { count: custody.summary.exceptions })}</span> : null}
             {canCoordinate ? (
               <button className="primary-button" disabled={submitting} onClick={onCheckout}>
-                <ArrowUpRight size={15} /> Check out
+                <ArrowUpRight size={15} /> {t('Check out')}
               </button>
             ) : null}
           </div>
@@ -571,33 +579,33 @@ function EquipmentDirectory({
               <div>
                 <div className="equipment-title">
                   <h4>{session.toolName}</h4>
-                  <span className={`status status-${session.overdue ? 'attention' : session.status}`}>{session.overdue ? 'overdue' : formatStatus(session.status)}</span>
+                  <span className={`status status-${session.overdue ? 'attention' : session.status}`}>{session.overdue ? formatStatus('overdue') : formatStatus(session.status)}</span>
                 </div>
                 <p>{session.jobTitle} / {session.workerName || session.checkedOutBy}</p>
               </div>
               <div className="equipment-custody-values">
-                <span>Out <strong>{formatDateTime(session.checkedOutAt)}</strong></span>
-                <span>Due <strong>{session.dueBackAt ? formatDateTime(session.dueBackAt) : 'Open'}</strong></span>
-                <span>Condition <strong>{formatStatus(session.returnCondition || session.checkoutCondition)}</strong></span>
-                <span>Location <strong>{session.returnLocation || session.checkoutLocation || 'Not retained'}</strong></span>
+                <span>{t('Out')} <strong>{formatDateTime(session.checkedOutAt)}</strong></span>
+                <span>{t('Due')} <strong>{session.dueBackAt ? formatDateTime(session.dueBackAt) : t('Open')}</strong></span>
+                <span>{t('Condition')} <strong>{formatStatus(session.returnCondition || session.checkoutCondition)}</strong></span>
+                <span>{t('Location')} <strong>{session.returnLocation || session.checkoutLocation || t('Not retained')}</strong></span>
               </div>
               {canCoordinate && session.status === 'checked_out' ? (
                 <button className="secondary-button" disabled={submitting} onClick={() => onReturn(session)}>
-                  <PackageCheck size={15} /> Return
+                  <PackageCheck size={15} /> {t('Return')}
                 </button>
               ) : null}
             </article>
           ))}
-          {!custody?.sessions?.length ? <Empty title="No custody history" detail="Check out reserved equipment to retain its physical handoff and return." /> : null}
+          {!custody?.sessions?.length ? <Empty title={t('No custody history')} detail={t('Check out reserved equipment to retain its physical handoff and return.')} /> : null}
         </div>
       </section>
       <div className="trade-partner-toolbar equipment-toolbar">
         <label className="search-control">
           <Search size={16} />
-          <span className="visually-hidden">Search equipment directory</span>
-          <input type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search equipment" />
+          <span className="visually-hidden">{t('Search equipment directory')}</span>
+          <input type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t('Search equipment')} />
         </label>
-        <div className="resource-tabs" role="tablist" aria-label="Equipment status">
+        <div className="resource-tabs" role="tablist" aria-label={t('Equipment status')}>
           {[
             ['active', 'Active'],
             ['attention', 'Attention'],
@@ -617,7 +625,7 @@ function EquipmentDirectory({
         {canCoordinate ? (
           <button className="secondary-button" disabled={submitting} onClick={onCreate}>
             <Plus size={16} />
-            Add equipment
+            {t('Add equipment')}
           </button>
         ) : null}
       </div>
@@ -634,47 +642,47 @@ function EquipmentDirectory({
                   <span className={`status status-${tool.status}`}>{formatStatus(tool.status)}</span>
                   {tool.inspection?.required ? (
                     <span className={`tag ${tool.inspection.requiresAttention ? 'tag-amber' : 'tag-green'}`}>
-                      Inspection {formatStatus(tool.inspection.status)}
+                      {t('Inspection')} {formatStatus(tool.inspection.status)}
                     </span>
                   ) : null}
-                  {tool.retirementApprovalId ? <span className="tag tag-amber">Retirement pending</span> : null}
+                  {tool.retirementApprovalId ? <span className="tag tag-amber">{t('Retirement pending')}</span> : null}
                 </div>
                 <p>{formatStatus(tool.category || 'general equipment')}</p>
-                <small>{tool.data?.serialNumber || tool.currentLocation || tool.homeLocation || 'Reference not retained'}</small>
+                <small>{tool.data?.serialNumber || tool.currentLocation || tool.homeLocation || t('Reference not retained')}</small>
               </div>
             </div>
             <div className="trade-partner-evidence equipment-details">
               <span>
-                Current location <strong>{tool.currentLocation || 'Not retained'}</strong>
+                {t('Current location')} <strong>{tool.currentLocation || t('Not retained')}</strong>
               </span>
               <span>
-                Inspection due <strong>{tool.inspection?.required ? formatDate(tool.inspection.dueAt) : 'Not required'}</strong>
+                {t('Inspection due')} <strong>{tool.inspection?.required ? formatDate(tool.inspection.dueAt) : t('Not required')}</strong>
               </span>
               <span>
-                Last inspection{' '}
+                {t('Last inspection')}{' '}
                 <strong>
                   {tool.inspection?.lastInspectedAt
                     ? `${formatDate(tool.inspection.lastInspectedAt)} / ${formatStatus(tool.inspection.lastResult)}`
-                    : 'Not retained'}
+                    : t('Not retained')}
                 </strong>
               </span>
               <span>
-                Last maintenance{' '}
+                {t('Last maintenance')}{' '}
                 <strong>
                   {tool.maintenance?.lastMaintainedAt
                     ? `${formatDate(tool.maintenance.lastMaintainedAt)} / ${formatStatus(tool.maintenance.latestMaintenance?.outcome)}`
-                    : 'Not retained'}
+                    : t('Not retained')}
                 </strong>
               </span>
               <span>
-                Active reservations <strong>{tool.activeReservationCount || 0}</strong>
+                {t('Active reservations')} <strong>{tool.activeReservationCount || 0}</strong>
               </span>
               <span>
-                Last updated <strong>{formatDate(tool.updatedAt)}</strong>
+                {t('Last updated')} <strong>{formatDate(tool.updatedAt)}</strong>
               </span>
               {tool.dormantReservationCount ? (
                 <span>
-                  Dormant reservations <strong>{tool.dormantReservationCount}</strong>
+                  {t('Dormant reservations')} <strong>{tool.dormantReservationCount}</strong>
                 </span>
               ) : null}
             </div>
@@ -686,40 +694,40 @@ function EquipmentDirectory({
                   onClick={() => onOpenApprovals({ approvalId: tool.retirementApprovalId })}
                 >
                   <ShieldCheck size={15} />
-                  Review retirement
+                  {t('Review retirement')}
                 </button>
               ) : null}
               {canCoordinate && tool.status !== 'retired' && !tool.retirementApprovalId ? (
                 <button
                   className="secondary-button"
-                  aria-label={`Record maintenance for ${tool.name}`}
+                  aria-label={t('Record maintenance for {name}', { name: tool.name })}
                   disabled={submitting}
                   onClick={() => onMaintain(tool)}
                 >
                   <Wrench size={15} />
-                  Maintain
+                  {t('Maintain')}
                 </button>
               ) : null}
               {canCoordinate && tool.status !== 'retired' && !tool.retirementApprovalId ? (
                 <button
                   className="secondary-button"
-                  aria-label={`Record inspection for ${tool.name}`}
+                  aria-label={t('Record inspection for {name}', { name: tool.name })}
                   disabled={submitting}
                   onClick={() => onInspect(tool)}
                 >
                   <ClipboardCheck size={15} />
-                  Inspect
+                  {t('Inspect')}
                 </button>
               ) : null}
               {canCoordinate && tool.status !== 'retired' ? (
-                <button className="icon-button" aria-label={`Edit ${tool.name}`} disabled={submitting} onClick={() => onEdit(tool)}>
+                <button className="icon-button" aria-label={t('Edit {name}', { name: tool.name })} disabled={submitting} onClick={() => onEdit(tool)}>
                   <Pencil size={16} />
                 </button>
               ) : null}
               {canCoordinate && tool.status !== 'retired' ? (
                 <button
                   className="icon-button danger-icon"
-                  aria-label={`Request retirement for ${tool.name}`}
+                  aria-label={t('Request retirement for {name}', { name: tool.name })}
                   disabled={submitting || Boolean(tool.retirementApprovalId)}
                   onClick={() => onRetire(tool)}
                 >
@@ -730,14 +738,14 @@ function EquipmentDirectory({
           </article>
         ))}
         {!visibleTools.length ? (
-          <Empty title="No matching equipment" detail="Retained equipment records matching this view will appear here." />
+          <Empty title={t('No matching equipment')} detail={t('Retained equipment records matching this view will appear here.')} />
         ) : null}
       </div>
     </div>
   )
 }
 
-function TradePartnerDirectory({ partners, summary, canCoordinate, canApprove, submitting, onCreate, onEdit, onRetire, onOpenApprovals }) {
+function TradePartnerDirectory({ t = identityText, partners, summary, canCoordinate, canApprove, submitting, onCreate, onEdit, onRetire, onOpenApprovals }) {
   const [query, setQuery] = useState('')
   const [filter, setFilter] = useState('active')
   const visiblePartners = useMemo(() => {
@@ -764,31 +772,31 @@ function TradePartnerDirectory({ partners, summary, canCoordinate, canApprove, s
 
   return (
     <div className="trade-partner-directory" data-testid="trade-partner-directory">
-      <div className="resource-summary trade-partner-summary" aria-label="Trade partner summary">
+      <div className="resource-summary trade-partner-summary" aria-label={t('Trade partner summary')}>
         <div>
-          <span>Active</span>
+          <span>{t('Active')}</span>
           <strong>{summary?.active || 0}</strong>
         </div>
         <div>
-          <span>Verified</span>
+          <span>{t('Verified')}</span>
           <strong>{summary?.verified || 0}</strong>
         </div>
         <div>
-          <span>Expiring</span>
+          <span>{t('Expiring')}</span>
           <strong>{summary?.expiring || 0}</strong>
         </div>
         <div>
-          <span>Action required</span>
+          <span>{t('Action required')}</span>
           <strong>{summary?.actionRequired || 0}</strong>
         </div>
       </div>
       <div className="trade-partner-toolbar">
         <label className="search-control">
           <Search size={16} />
-          <span className="visually-hidden">Search trade partners</span>
-          <input type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search partners" />
+          <span className="visually-hidden">{t('Search trade partners')}</span>
+          <input type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t('Search partners')} />
         </label>
-        <div className="resource-tabs" role="tablist" aria-label="Trade partner status">
+        <div className="resource-tabs" role="tablist" aria-label={t('Trade partner status')}>
           {[
             ['active', 'Active'],
             ['attention', 'Attention'],
@@ -801,14 +809,14 @@ function TradePartnerDirectory({ partners, summary, canCoordinate, canApprove, s
               className={filter === key ? 'resource-tab-active' : ''}
               onClick={() => setFilter(key)}
             >
-              {label}
+              {t(label)}
             </button>
           ))}
         </div>
         {canCoordinate ? (
           <button className="primary-button" disabled={submitting} onClick={onCreate}>
             <Plus size={16} />
-            Add trade partner
+            {t('Add trade partner')}
           </button>
         ) : null}
       </div>
@@ -816,7 +824,7 @@ function TradePartnerDirectory({ partners, summary, canCoordinate, canApprove, s
         {visiblePartners.map((partner) => {
           const compliance = partner.compliance || { status: 'needs_review', blockers: [], warnings: [] }
           const evidenceMessage =
-            compliance.blockers?.[0]?.message || compliance.warnings?.[0]?.message || 'Required partner evidence is current.'
+            compliance.blockers?.[0]?.message || compliance.warnings?.[0]?.message || t('Required partner evidence is current.')
           return (
             <article className="trade-partner-row" key={partner.id}>
               <div className="trade-partner-identity">
@@ -830,17 +838,17 @@ function TradePartnerDirectory({ partners, summary, canCoordinate, canApprove, s
                   </div>
                   <p>
                     {formatStatus(partner.partnerType)}
-                    {partner.specialties?.length ? ` · ${partner.specialties.slice(0, 3).join(', ')}` : ''}
+                    {partner.specialties?.length ? ` / ${partner.specialties.slice(0, 3).join(', ')}` : ''}
                   </p>
-                  <small>{partner.contactName || partner.email || partner.city || 'Contact not retained'}</small>
+                  <small>{partner.contactName || partner.email || partner.city || t('Contact not retained')}</small>
                 </div>
               </div>
               <div className="trade-partner-evidence">
                 <span>
-                  Registration <strong>{partner.registrationNumber || 'Missing'}</strong>
+                  {t('Registration')} <strong>{partner.registrationNumber || t('Missing')}</strong>
                 </span>
                 <span>
-                  VAT <strong>{partner.data?.vatExempt ? 'Exempt' : partner.vatNumber || 'Missing'}</strong>
+                  {t('VAT')} <strong>{partner.data?.vatExempt ? t('Exempt') : partner.vatNumber || t('Missing')}</strong>
                 </span>
                 <p>{evidenceMessage}</p>
               </div>
@@ -852,18 +860,18 @@ function TradePartnerDirectory({ partners, summary, canCoordinate, canApprove, s
                     onClick={() => onOpenApprovals({ approvalId: partner.retirementApprovalId })}
                   >
                     <ShieldCheck size={15} />
-                    Review retirement
+                    {t('Review retirement')}
                   </button>
                 ) : null}
                 {canCoordinate && partner.status !== 'retired' ? (
-                  <button className="icon-button" aria-label={`Edit ${partner.name}`} disabled={submitting} onClick={() => onEdit(partner)}>
+                  <button className="icon-button" aria-label={t('Edit {name}', { name: partner.name })} disabled={submitting} onClick={() => onEdit(partner)}>
                     <Pencil size={16} />
                   </button>
                 ) : null}
                 {canCoordinate && partner.status !== 'retired' ? (
                   <button
                     className="icon-button danger-icon"
-                    aria-label={`Request retirement for ${partner.name}`}
+                    aria-label={t('Request retirement for {name}', { name: partner.name })}
                     disabled={submitting || Boolean(partner.retirementApprovalId)}
                     onClick={() => onRetire(partner)}
                   >
@@ -875,7 +883,7 @@ function TradePartnerDirectory({ partners, summary, canCoordinate, canApprove, s
           )
         })}
         {!visiblePartners.length ? (
-          <Empty title="No matching trade partners" detail="Supplier and subcontractor records matching this view will appear here." />
+          <Empty title={t('No matching trade partners')} detail={t('Supplier and subcontractor records matching this view will appear here.')} />
         ) : null}
       </div>
     </div>
@@ -883,6 +891,7 @@ function TradePartnerDirectory({ partners, summary, canCoordinate, canApprove, s
 }
 
 function TimesheetWorkspace({
+  t = identityText,
   timesheets,
   canCoordinate,
   canApprove,
@@ -910,14 +919,14 @@ function TimesheetWorkspace({
     <div className="timesheet-workspace" data-testid="timesheet-workspace">
       <div className="timesheet-toolbar">
         <label>
-          Week starting
+          {t('Week starting')}
           <input type="date" value={periodStart} onChange={(event) => changePeriod(event.target.value)} />
         </label>
         <div className="timesheet-toolbar-actions">
           {latestExport?.integrityValid ? (
             <a className="secondary-button" href={latestExport.downloadPath} download>
               <FileDown size={15} />
-              Download latest
+              {t('Download latest')}
             </a>
           ) : null}
           {canCoordinate ? (
@@ -926,20 +935,20 @@ function TimesheetWorkspace({
               className="primary-button"
               data-testid="prepare-timesheet-export"
               disabled={submitting || !summary.handoffReady}
-              title={summary.handoffReady ? 'Prepare a checksum-protected CSV handoff' : 'Approve every submitted worker week before preparing a handoff'}
+              title={t(summary.handoffReady ? 'Prepare a checksum-protected CSV handoff' : 'Approve every submitted worker week before preparing a handoff')}
               onClick={() => onPrepareExport(periodStart)}
             >
               <FileDown size={15} />
-              Prepare handoff
+              {t('Prepare handoff')}
             </button>
           ) : null}
         </div>
       </div>
-      <div className="timesheet-summary" aria-label="Weekly timesheet summary">
-        <div><span>Submitted hours</span><strong>{roundDisplay(summary.submittedHours || 0)}</strong></div>
-        <div><span>Review required</span><strong>{summary.reviewRequired || 0}</strong></div>
-        <div><span>Approved</span><strong>{summary.approved || 0}</strong></div>
-        <div><span>Exceptions</span><strong>{summary.exceptions || 0}</strong></div>
+      <div className="timesheet-summary" aria-label={t('Weekly timesheet summary')}>
+        <div><span>{t('Submitted hours')}</span><strong>{roundDisplay(summary.submittedHours || 0)}</strong></div>
+        <div><span>{t('Review required')}</span><strong>{summary.reviewRequired || 0}</strong></div>
+        <div><span>{t('Approved')}</span><strong>{summary.approved || 0}</strong></div>
+        <div><span>{t('Exceptions')}</span><strong>{summary.exceptions || 0}</strong></div>
       </div>
       <div className="timesheet-list">
         {(board.rows || []).map((row) => {
@@ -954,17 +963,17 @@ function TimesheetWorkspace({
                 <span className="timesheet-worker-icon"><Users size={17} /></span>
                 <div>
                   <strong>{row.worker.name}</strong>
-                  <small>{row.worker.role || 'Crew member'} / {formatDate(board.periodStart)} to {formatDate(board.periodEnd)}</small>
+                  <small>{row.worker.role || t('Crew member')} / {t('{start} to {end}', { start: formatDate(board.periodStart), end: formatDate(board.periodEnd) })}</small>
                 </div>
                 <span className={`status status-${row.sourceCurrent ? row.status : 'attention'}`}>
-                  {row.sourceCurrent ? formatStatus(row.status) : 'revision needed'}
+                  {row.sourceCurrent ? formatStatus(row.status) : t('revision needed')}
                 </span>
               </div>
               <div className="timesheet-values">
-                <span><strong>{roundDisplay(preview.summary.totalHours || 0)}</strong> logged</span>
-                <span><strong>{roundDisplay(preview.summary.billableHours || 0)}</strong> billable</span>
-                <span><strong>{roundDisplay(preview.summary.attendanceHours || 0)}</strong> attendance</span>
-                <span><strong>{preview.summary.jobCount || 0}</strong> jobs</span>
+                <span><strong>{roundDisplay(preview.summary.totalHours || 0)}</strong> {t('logged')}</span>
+                <span><strong>{roundDisplay(preview.summary.billableHours || 0)}</strong> {t('billable')}</span>
+                <span><strong>{roundDisplay(preview.summary.attendanceHours || 0)}</strong> {t('attendance')}</span>
+                <span><strong>{preview.summary.jobCount || 0}</strong> {t('jobs')}</span>
               </div>
               {preview.exceptions?.length ? (
                 <div className="timesheet-exceptions">
@@ -975,35 +984,35 @@ function TimesheetWorkspace({
               {!preview.ready ? (
                 <div className="timesheet-exceptions timesheet-blocker">
                   <Ban size={15} />
-                  <span>{preview.blockers?.map((item) => item.message).join(' ') || 'Source evidence is not ready for review.'}</span>
+                  <span>{preview.blockers?.map((item) => item.message).join(' ') || t('Source evidence is not ready for review.')}</span>
                 </div>
               ) : null}
               <div className="timesheet-row-actions">
-                {current ? <span className="timesheet-version">v{current.versionNumber} / {shortHash(current.sourceHash)}</span> : <span className="timesheet-version">No retained review</span>}
+                {current ? <span className="timesheet-version">v{current.versionNumber} / {shortHash(current.sourceHash)}</span> : <span className="timesheet-version">{t('No retained review')}</span>}
                 {pending && canApprove ? (
                   <button type="button" className="secondary-button" disabled={submitting} onClick={() => onOpenApprovals({ approvalId: current.approvalId })}>
                     <ShieldCheck size={15} />
-                    Review approval
+                    {t('Review approval')}
                   </button>
                 ) : null}
                 {canSubmit ? (
                   <button type="button" className="secondary-button" disabled={submitting} onClick={() => onRequest(row.worker.id, periodStart)}>
                     <ClipboardCheck size={15} />
-                    {current?.status === 'approved' ? 'Request revision' : 'Request review'}
+                    {t(current?.status === 'approved' ? 'Request revision' : 'Request review')}
                   </button>
                 ) : null}
               </div>
             </article>
           )
         })}
-        {!board.rows?.length ? <Empty title="No workers in this period" detail="Workers and retained time evidence for the selected week will appear here." /> : null}
+        {!board.rows?.length ? <Empty title={t('No workers in this period')} detail={t('Workers and retained time evidence for the selected week will appear here.')} /> : null}
       </div>
-      <p className="timesheet-policy">Approved worker time logs remain the payable-hours source. Attendance is shown only for exception review; preparing a handoff does not execute payroll or contact a provider.</p>
+      <p className="timesheet-policy">{t('Approved worker time logs remain the payable-hours source. Attendance is shown only for exception review; preparing a handoff does not execute payroll or contact a provider.')}</p>
     </div>
   )
 }
 
-function MaterialReceivingWorkspace({ register, canCoordinate, canApprove, submitting, onCreate, onReverse, onOpenApprovals, onOpen }) {
+function MaterialReceivingWorkspace({ t = identityText, register, canCoordinate, canApprove, submitting, onCreate, onReverse, onOpenApprovals, onOpen }) {
   const [view, setView] = useState('active')
   const receipts = register?.receipts || EMPTY_LIST
   const purchaseOrders = register?.purchaseOrders || EMPTY_LIST
@@ -1017,47 +1026,47 @@ function MaterialReceivingWorkspace({ register, canCoordinate, canApprove, submi
 
   return (
     <div className="material-receiving-workspace" data-testid="material-receiving-workspace">
-      <div className="resource-summary" aria-label="Material receiving summary">
-        <div><span>Receipts</span><strong>{summary.total || 0}</strong></div>
-        <div><span>Discrepancies</span><strong>{summary.discrepancies || 0}</strong></div>
-        <div><span>Awaiting receipt</span><strong>{summary.openOrders || 0}</strong></div>
-        <div><span>Accepted units</span><strong>{roundDisplay(summary.acceptedQuantity || 0)}</strong></div>
+      <div className="resource-summary" aria-label={t('Material receiving summary')}>
+        <div><span>{t('Receipts')}</span><strong>{summary.total || 0}</strong></div>
+        <div><span>{t('Discrepancies')}</span><strong>{summary.discrepancies || 0}</strong></div>
+        <div><span>{t('Awaiting receipt')}</span><strong>{summary.openOrders || 0}</strong></div>
+        <div><span>{t('Accepted units')}</span><strong>{roundDisplay(summary.acceptedQuantity || 0)}</strong></div>
       </div>
       <div className="workforce-mode-toolbar">
-        <div className="resource-tabs" role="tablist" aria-label="Material receipt status">
+        <div className="resource-tabs" role="tablist" aria-label={t('Material receipt status')}>
           {[
             ['active', 'Active'],
             ['exceptions', 'Exceptions'],
             ['history', 'History'],
           ].map(([key, label]) => (
             <button key={key} type="button" role="tab" aria-selected={view === key} className={view === key ? 'resource-tab-active' : ''} onClick={() => setView(key)}>
-              {label}
+              {t(label)}
             </button>
           ))}
         </div>
         {canCoordinate ? (
           <button type="button" className="primary-button" disabled={submitting} onClick={() => onCreate()}>
-            <Plus size={15} /> Record delivery
+            <Plus size={15} /> {t('Record delivery')}
           </button>
         ) : null}
       </div>
       {view !== 'history' && openPlans.length ? (
-        <div className="resource-readiness-list material-receiving-orders" aria-label="Purchase orders awaiting receipt">
+        <div className="resource-readiness-list material-receiving-orders" aria-label={t('Purchase orders awaiting receipt')}>
           {openPlans.map((plan) => {
             const order = plan.purchaseOrder || {}
             return (
               <article className="resource-readiness-item" key={order.id}>
                 <div className="resource-readiness-copy">
                   <div className="resource-readiness-title">
-                    <h3>{order.supplier || 'Retained supplier'}</h3>
-                    <span className="status status-attention">{plan.summary?.remainingLines || 0} line(s) due</span>
+                    <h3>{order.supplier || t('Retained supplier')}</h3>
+                    <span className="status status-attention">{t('{count} lines due', { count: plan.summary?.remainingLines || 0 })}</span>
                   </div>
                   <p>{order.jobTitle || order.jobId} / {order.issueReference || order.orderNumber || order.id}</p>
                   <small>{plan.lines.filter((line) => !line.complete).map((line) => `${line.itemName}: ${roundDisplay(line.remainingQuantity)} ${line.unit}`).join(' / ')}</small>
                 </div>
                 {canCoordinate ? (
                   <button type="button" className="secondary-button" disabled={submitting} onClick={() => onCreate(plan)}>
-                    <PackageCheck size={15} /> Receive
+                    <PackageCheck size={15} /> {t('Receive')}
                   </button>
                 ) : null}
               </article>
@@ -1074,22 +1083,22 @@ function MaterialReceivingWorkspace({ register, canCoordinate, canApprove, submi
                 <span className={`status status-${receipt.status}`}>{formatStatus(receipt.status)}</span>
               </div>
               <p>{receipt.jobTitle || receipt.jobId} / {receipt.receivedBy} / {formatDateTime(receipt.deliveredAt)}</p>
-              <small>{receipt.lines?.map((line) => `${line.itemName}: ${roundDisplay(line.acceptedQuantity)} ${line.unit} accepted`).join(' / ')}</small>
+              <small>{receipt.lines?.map((line) => t('{item}: {quantity} {unit} accepted', { item: line.itemName, quantity: roundDisplay(line.acceptedQuantity), unit: line.unit })).join(' / ')}</small>
               {receipt.exceptions?.length ? <p className="workflow-note">{receipt.exceptions.map((item) => item.message).join(' ')}</p> : null}
             </div>
             <div className="timesheet-row-actions">
-              <button type="button" className="icon-button" title="Open job" aria-label={`Open ${receipt.jobTitle || 'job'}`} onClick={() => onOpen(receipt.jobId)}><ChevronRight size={16} /></button>
+              <button type="button" className="icon-button" title={t('Open job')} aria-label={t('Open {name}', { name: receipt.jobTitle || t('job') })} onClick={() => onOpen(receipt.jobId)}><ChevronRight size={16} /></button>
               {receipt.status === 'pending_reversal' && canApprove ? (
-                <button type="button" className="secondary-button" onClick={() => onOpenApprovals({ approvalId: receipt.reversalApprovalId })}><ShieldCheck size={15} /> Review</button>
+                <button type="button" className="secondary-button" onClick={() => onOpenApprovals({ approvalId: receipt.reversalApprovalId })}><ShieldCheck size={15} /> {t('Review')}</button>
               ) : canCoordinate && ['received', 'discrepancy'].includes(receipt.status) ? (
-                <button type="button" className="secondary-button" disabled={submitting} onClick={() => onReverse(receipt)}><Undo2 size={15} /> Reverse</button>
+                <button type="button" className="secondary-button" disabled={submitting} onClick={() => onReverse(receipt)}><Undo2 size={15} /> {t('Reverse')}</button>
               ) : null}
             </div>
           </article>
         ))}
-        {!visibleReceipts.length ? <Empty title="No material receipts" detail="Retained delivery tickets and discrepancy evidence will appear here." /> : null}
+        {!visibleReceipts.length ? <Empty title={t('No material receipts')} detail={t('Retained delivery tickets and discrepancy evidence will appear here.')} /> : null}
       </div>
-      <p className="timesheet-policy">Receipts are immutable operational evidence. Corrections use an approval-gated reversal; supplier invoices can link only to current retained receipt evidence.</p>
+      <p className="timesheet-policy">{t('Receipts are immutable operational evidence. Corrections use an approval-gated reversal; supplier invoices can link only to current retained receipt evidence.')}</p>
     </div>
   )
 }
@@ -1149,7 +1158,7 @@ function ResourcesWorkspace({
   onOpen,
   request,
 }) {
-  const t = (key) => operatorText(locale, key)
+  const t = (key, variables = {}) => operatorText(locale, key, variables)
   const [workforceMode, setWorkforceMode] = useState('readiness')
   const isWorkforce = view === 'workforce'
   const isInventory = view === 'inventory'
@@ -1169,28 +1178,28 @@ function ResourcesWorkspace({
     <section className="panel page-panel resources-workspace" data-testid="resources-workspace">
       <div className="panel-heading resources-heading">
         <div>
-          <h2>{isTimesheets ? 'Weekly labor review' : isReceiving ? 'Material receiving' : isFiveS ? t('5S organization control') : 'Resource readiness'}</h2>
+          <h2>{t(isTimesheets ? 'Weekly labor review' : isReceiving ? 'Material receiving' : isFiveS ? '5S organization control' : 'Resource readiness')}</h2>
           <p>
             {isTimesheets
-              ? 'Review submitted worker time by week, resolve exceptions, approve immutable revisions, and prepare a controlled payroll handoff.'
+              ? t('Review submitted worker time by week, resolve exceptions, approve immutable revisions, and prepare a controlled payroll handoff.')
               : isReceiving
-                ? 'Retain delivery-note evidence, resolve quantity and damage exceptions, and connect accepted goods to purchasing and finance.'
+                ? t('Retain delivery-note evidence, resolve quantity and damage exceptions, and connect accepted goods to purchasing and finance.')
               : isPartners
-              ? 'Retain supplier and subcontractor identity, compliance, and expiry evidence before purchasing approval.'
+              ? t('Retain supplier and subcontractor identity, compliance, and expiry evidence before purchasing approval.')
               : isFiveS
                 ? t('Control vehicle, trailer, depot, store, and job-storage standards with approved checks, field audits, and evidence-backed corrective actions.')
               : isEquipment
-                ? 'Maintain retained equipment identity, condition, location, reservation, and retirement safeguards.'
+                ? t('Maintain retained equipment identity, condition, location, reservation, and retirement safeguards.')
                 : isQualifications
-                  ? 'Verify retained worker credentials, enforce role-specific job requirements, and resolve expiry or evidence gaps before site work.'
+                  ? t('Verify retained worker credentials, enforce role-specific job requirements, and resolve expiry or evidence gaps before site work.')
                 : isAvailability
-                  ? 'Retain time-bounded operational availability and resolve assignment conflicts before scheduling or dispatch.'
+                  ? t('Retain time-bounded operational availability and resolve assignment conflicts before scheduling or dispatch.')
                 : isCrewDirectory
-                  ? 'Maintain retained crew identity, availability, skills, cost, and assignment safeguards.'
-                  : 'Coordinate retained crew, equipment, material, procurement, and loading records before work is committed.'}
+                  ? t('Maintain retained crew identity, availability, skills, cost, and assignment safeguards.')
+                  : t('Coordinate retained crew, equipment, material, procurement, and loading records before work is committed.')}
           </p>
         </div>
-        <div className="resource-tabs" role="tablist" aria-label="Resource readiness view">
+        <div className="resource-tabs" role="tablist" aria-label={t('Resource readiness view')}>
           <button
             role="tab"
             aria-selected={isWorkforce}
@@ -1198,7 +1207,7 @@ function ResourcesWorkspace({
             onClick={() => onViewChange('workforce')}
           >
             <Users size={15} />
-            Workforce
+            {t('Workforce')}
           </button>
           <button
             role="tab"
@@ -1207,7 +1216,7 @@ function ResourcesWorkspace({
             onClick={() => onViewChange('inventory')}
           >
             <PackageCheck size={15} />
-            Inventory
+            {t('Inventory')}
           </button>
           <button
             role="tab"
@@ -1216,7 +1225,7 @@ function ResourcesWorkspace({
             onClick={() => onViewChange('receiving')}
           >
             <ClipboardList size={15} />
-            Receiving
+            {t('Receiving')}
           </button>
           <button
             role="tab"
@@ -1225,7 +1234,7 @@ function ResourcesWorkspace({
             onClick={() => onViewChange('equipment')}
           >
             <Wrench size={15} />
-            Equipment
+            {t('Equipment')}
           </button>
           <button
             role="tab"
@@ -1243,7 +1252,7 @@ function ResourcesWorkspace({
             onClick={() => onViewChange('partners')}
           >
             <Building2 size={15} />
-            Trade partners
+            {t('Trade partners')}
           </button>
           <button
             role="tab"
@@ -1252,13 +1261,13 @@ function ResourcesWorkspace({
             onClick={() => onViewChange('timesheets')}
           >
             <Timer size={15} />
-            Timesheets
+            {t('Timesheets')}
           </button>
         </div>
       </div>
       {isWorkforce ? (
         <div className="workforce-mode-toolbar">
-          <div className="resource-tabs" role="tablist" aria-label="Workforce workspace mode">
+          <div className="resource-tabs" role="tablist" aria-label={t('Workforce workspace mode')}>
             <button
               role="tab"
               aria-selected={workforceMode === 'readiness'}
@@ -1266,7 +1275,7 @@ function ResourcesWorkspace({
               onClick={() => setWorkforceMode('readiness')}
             >
               <ClipboardCheck size={15} />
-              Readiness
+              {t('Readiness')}
             </button>
             <button
               role="tab"
@@ -1275,7 +1284,7 @@ function ResourcesWorkspace({
               onClick={() => setWorkforceMode('crew')}
             >
               <Users size={15} />
-              Crew directory
+              {t('Crew directory')}
             </button>
             <button
               role="tab"
@@ -1284,7 +1293,7 @@ function ResourcesWorkspace({
               onClick={() => setWorkforceMode('qualifications')}
             >
               <ShieldCheck size={15} />
-              Qualifications
+              {t('Qualifications')}
             </button>
             <button
               role="tab"
@@ -1293,7 +1302,7 @@ function ResourcesWorkspace({
               onClick={() => setWorkforceMode('availability')}
             >
               <CalendarOff size={15} />
-              Availability
+              {t('Availability')}
             </button>
           </div>
         </div>
@@ -1311,6 +1320,7 @@ function ResourcesWorkspace({
         />
       ) : isReceiving ? (
         <MaterialReceivingWorkspace
+          t={t}
           register={materialReceiving}
           canCoordinate={canCoordinate}
           canApprove={canApprove}
@@ -1322,6 +1332,7 @@ function ResourcesWorkspace({
         />
       ) : isTimesheets ? (
         <TimesheetWorkspace
+          t={t}
           timesheets={timesheets}
           canCoordinate={canCoordinate}
           canApprove={canApprove}
@@ -1333,6 +1344,7 @@ function ResourcesWorkspace({
         />
       ) : isPartners ? (
         <TradePartnerDirectory
+          t={t}
           partners={tradePartners}
           summary={tradePartnerSummary}
           canCoordinate={canCoordinate}
@@ -1345,6 +1357,7 @@ function ResourcesWorkspace({
         />
       ) : isEquipment ? (
         <EquipmentDirectory
+          t={t}
           tools={tools}
           summary={toolSummary}
           custody={equipmentCustody}
@@ -1362,6 +1375,7 @@ function ResourcesWorkspace({
         />
       ) : isAvailability ? (
         <AvailabilityWorkspace
+          t={t}
           register={availabilityRegister}
           workers={workers}
           canCoordinate={canCoordinate}
@@ -1373,6 +1387,7 @@ function ResourcesWorkspace({
         />
       ) : isQualifications ? (
         <QualificationWorkspace
+          t={t}
           register={qualificationRegister}
           workers={workers}
           canCoordinate={canCoordinate}
@@ -1386,6 +1401,7 @@ function ResourcesWorkspace({
         />
       ) : isCrewDirectory ? (
         <WorkerDirectory
+          t={t}
           workers={workers}
           summary={workerSummary}
           canCoordinate={canCoordinate}
@@ -1398,42 +1414,42 @@ function ResourcesWorkspace({
         />
       ) : (
         <>
-          <div className="resource-summary" aria-label={`${isWorkforce ? 'Workforce' : 'Inventory'} summary`}>
+          <div className="resource-summary" aria-label={t(isWorkforce ? 'Workforce summary' : 'Inventory summary')}>
             {isWorkforce ? (
               <>
                 <div>
-                  <span>Needs crew</span>
+                  <span>{t('Needs crew')}</span>
                   <strong>{summary.needsAssignment || 0}</strong>
                 </div>
                 <div>
-                  <span>Conflicts</span>
+                  <span>{t('Conflicts')}</span>
                   <strong>{summary.workerConflicts || 0}</strong>
                 </div>
                 <div>
-                  <span>Instructions</span>
+                  <span>{t('Instructions')}</span>
                   <strong>{summary.needsInstruction || 0}</strong>
                 </div>
                 <div>
-                  <span>Site access</span>
+                  <span>{t('Site access')}</span>
                   <strong>{summary.siteAccess || 0}</strong>
                 </div>
               </>
             ) : (
               <>
                 <div>
-                  <span>Procurement</span>
+                  <span>{t('Procurement')}</span>
                   <strong>{summary.procurementNeeded || 0}</strong>
                 </div>
                 <div>
-                  <span>Partner holds</span>
+                  <span>{t('Partner holds')}</span>
                   <strong>{summary.partnerComplianceBlocks || 0}</strong>
                 </div>
                 <div>
-                  <span>Loading gaps</span>
+                  <span>{t('Loading gaps')}</span>
                   <strong>{summary.loadingMissing || 0}</strong>
                 </div>
                 <div>
-                  <span>Approvals</span>
+                  <span>{t('Approvals')}</span>
                   <strong>{summary.pendingApprovals || 0}</strong>
                 </div>
               </>
@@ -1441,7 +1457,7 @@ function ResourcesWorkspace({
           </div>
           <div className="resource-readiness-list" role="tabpanel">
             {rows.map((item) => {
-              const job = jobs.find((candidate) => candidate.id === item.jobId) || { id: item.jobId, title: item.jobTitle || 'Ledger job' }
+              const job = jobs.find((candidate) => candidate.id === item.jobId) || { id: item.jobId, title: item.jobTitle || t('Ledger job') }
               const status = isWorkforce ? item.workforceStatus : item.inventoryStatus
               const canAct = canCoordinate && !item.flags?.approvalRequired
               const canPlan =
@@ -1454,7 +1470,7 @@ function ResourcesWorkspace({
               const canDraftProcurement = canAct && !isWorkforce && item.flags?.procurementNeeded && !item.counts?.procurementOrders
               const canPrepareLoading = canAct && !isWorkforce && item.flags?.loadingMissing && !item.counts?.loadingPlans
               const resourceAction = canAct ? item.nextActions?.find((action) => RESOURCE_ACTION_LABELS[action.type]) : null
-              const resourceActionLabel = RESOURCE_ACTION_LABELS[resourceAction?.type]
+              const resourceActionLabel = resourceAction ? t(RESOURCE_ACTION_LABELS[resourceAction.type]) : null
               const crewReviewActions =
                 canAct && isWorkforce
                   ? item.nextActions?.filter((action) => ['publish_worker_instruction', 'clear_site_access'].includes(action.type)) || []
@@ -1463,69 +1479,69 @@ function ResourcesWorkspace({
                 <article className="resource-readiness-item" key={`${view}-${item.jobId}`}>
                   <div className="resource-readiness-copy">
                     <div className="resource-readiness-title">
-                      <h3>{item.jobTitle || 'Ledger job'}</h3>
+                      <h3>{item.jobTitle || t('Ledger job')}</h3>
                       <span className={`status status-${status}`}>{formatStatus(status)}</span>
                     </div>
-                    <p>{item.nextAction || 'Resource records are stable.'}</p>
+                    <p>{t(item.nextAction || 'Resource records are stable.')}</p>
                     {isWorkforce ? (
                       <div className="resource-readiness-values">
                         <span>
-                          Assigned <strong>{item.counts?.activeAssignments || 0}</strong>
+                          {t('Assigned')} <strong>{item.counts?.activeAssignments || 0}</strong>
                         </span>
                         <span>
-                          Conflicts <strong>{item.counts?.workerConflicts || 0}</strong>
+                          {t('Conflicts')} <strong>{item.counts?.workerConflicts || 0}</strong>
                         </span>
                         <span>
-                          Unavailable <strong>{item.counts?.offlineAssignments || 0}</strong>
+                          {t('Unavailable')} <strong>{item.counts?.offlineAssignments || 0}</strong>
                         </span>
                         <span>
-                          Instructions <strong>{item.counts?.workerInstructions || 0}</strong>
+                          {t('Instructions')} <strong>{item.counts?.workerInstructions || 0}</strong>
                         </span>
                         <span>
-                          Hours logged <strong>{item.counts?.billableHours || 0}</strong>
+                          {t('Hours logged')} <strong>{item.counts?.billableHours || 0}</strong>
                         </span>
                       </div>
                     ) : (
                       <div className="resource-readiness-values">
                         <span>
-                          Open materials <strong>{item.counts?.openMaterials || 0}</strong>
+                          {t('Open materials')} <strong>{item.counts?.openMaterials || 0}</strong>
                         </span>
                         <span>
-                          Reserved tools <strong>{item.counts?.toolReservations || 0}</strong>
+                          {t('Reserved tools')} <strong>{item.counts?.toolReservations || 0}</strong>
                         </span>
                         <span>
-                          Load items <strong>{item.counts?.loadingItems || 0}</strong>
+                          {t('Load items')} <strong>{item.counts?.loadingItems || 0}</strong>
                         </span>
                         <span>
-                          Material cost <strong>{currency.format(item.money?.materialCost || 0)}</strong>
+                          {t('Material cost')} <strong>{currency.format(item.money?.materialCost || 0)}</strong>
                         </span>
                       </div>
                     )}
                     <div className="resource-readiness-flags">
                       {item.counts?.pendingApprovals ? (
                         <span className="tag tag-amber">
-                          {item.counts.pendingApprovals} approval{item.counts.pendingApprovals === 1 ? '' : 's'}
+                          {t(item.counts.pendingApprovals === 1 ? '{count} approval' : '{count} approvals', { count: item.counts.pendingApprovals })}
                         </span>
                       ) : null}
                       {!isWorkforce && item.counts?.partnerComplianceBlocks ? (
                         <span className="tag tag-amber">
-                          {item.counts.partnerComplianceBlocks} partner hold{item.counts.partnerComplianceBlocks === 1 ? '' : 's'}
+                          {t(item.counts.partnerComplianceBlocks === 1 ? '{count} partner hold' : '{count} partner holds', { count: item.counts.partnerComplianceBlocks })}
                         </span>
                       ) : null}
                       {isWorkforce && item.counts?.dueOrientations ? (
-                        <span className="tag tag-amber">{item.counts.dueOrientations} orientation due</span>
+                        <span className="tag tag-amber">{t('{count} orientation due', { count: item.counts.dueOrientations })}</span>
                       ) : null}
                       {isWorkforce && item.counts?.staleCrewEvidence ? (
                         <span className="tag">
-                          {item.counts.staleCrewEvidence} historical crew record{item.counts.staleCrewEvidence === 1 ? '' : 's'}
+                          {t(item.counts.staleCrewEvidence === 1 ? '{count} historical crew record' : '{count} historical crew records', { count: item.counts.staleCrewEvidence })}
                         </span>
                       ) : null}
                       {!isWorkforce && item.counts?.dueMaterials ? (
                         <span className="tag tag-amber">
-                          {item.counts.dueMaterials} material item{item.counts.dueMaterials === 1 ? '' : 's'} due
+                          {t(item.counts.dueMaterials === 1 ? '{count} material item due' : '{count} material items due', { count: item.counts.dueMaterials })}
                         </span>
                       ) : null}
-                      {!isWorkforce && item.loadingReadiness?.trailerRequired ? <span className="tag">Trailer required</span> : null}
+                      {!isWorkforce && item.loadingReadiness?.trailerRequired ? <span className="tag">{t('Trailer required')}</span> : null}
                     </div>
                   </div>
                   <div className="resource-readiness-actions">
@@ -1542,70 +1558,70 @@ function ResourcesWorkspace({
                         }
                       >
                         <ShieldCheck size={16} />
-                        Review approval
+                        {t('Review approval')}
                       </button>
                     ) : null}
                     {!isWorkforce && item.flags?.supplierComplianceBlocked && canCoordinate ? (
                       <button className="secondary-button" disabled={submitting} onClick={() => onViewChange('partners')}>
                         <Building2 size={16} />
-                        Trade partners
+                        {t('Trade partners')}
                       </button>
                     ) : null}
                     {canPlan ? (
                       <button className="secondary-button" disabled={submitting} onClick={() => onPlan(item)}>
                         <Users size={16} />
-                        Plan resources
+                        {t('Plan resources')}
                       </button>
                     ) : null}
                     {canDraftInstruction ? (
                       <button
                         className="secondary-button"
-                        aria-label={`Draft crew instructions for ${job.title}`}
+                        aria-label={t('Draft crew instructions for {name}', { name: job.title })}
                         disabled={submitting}
                         onClick={() => onDraftInstruction(item)}
                       >
                         <ClipboardCheck size={16} />
-                        Draft instructions
+                        {t('Draft instructions')}
                       </button>
                     ) : null}
                     {crewReviewActions.map((action) => (
                       <button
                         className="secondary-button"
                         key={`${action.type}-${action.recordId || action.assignmentId || action.workerId}`}
-                        aria-label={`${action.label} for ${job.title}`}
+                        aria-label={t('{action} for {name}', { action: t(action.label), name: job.title })}
                         disabled={submitting}
                         onClick={() => onReviewCrewEvidence(item, action)}
                       >
                         <ShieldCheck size={16} />
-                        {action.type === 'publish_worker_instruction' ? 'Review instructions' : 'Clear site access'}
+                        {t(action.type === 'publish_worker_instruction' ? 'Review instructions' : 'Clear site access')}
                       </button>
                     ))}
                     {canDraftProcurement ? (
                       <button
                         className="secondary-button"
-                        aria-label={`Draft procurement for ${job.title}`}
+                        aria-label={t('Draft procurement for {name}', { name: job.title })}
                         disabled={submitting}
                         onClick={() => onDraftProcurement(item)}
                       >
                         <ReceiptEuro size={16} />
-                        Draft procurement
+                        {t('Draft procurement')}
                       </button>
                     ) : null}
                     {canPrepareLoading ? (
                       <button
                         className="secondary-button"
-                        aria-label={`Prepare loading checklist for ${job.title}`}
+                        aria-label={t('Prepare loading checklist for {name}', { name: job.title })}
                         disabled={submitting}
                         onClick={() => onPrepareLoading(item)}
                       >
                         <PackageCheck size={16} />
-                        Loading checklist
+                        {t('Loading checklist')}
                       </button>
                     ) : null}
                     {resourceAction && resourceActionLabel ? (
                       <button
                         className="secondary-button"
-                        aria-label={`${resourceActionLabel} for ${job.title}`}
+                        aria-label={t('{action} for {name}', { action: resourceActionLabel, name: job.title })}
                         disabled={submitting}
                         onClick={() => onAction(item, resourceAction)}
                       >
@@ -1613,7 +1629,7 @@ function ResourcesWorkspace({
                         {resourceActionLabel}
                       </button>
                     ) : null}
-                    <button className="icon-button table-action" aria-label={`Open ${job.title}`} onClick={() => onOpen(job)}>
+                    <button className="icon-button table-action" aria-label={t('Open {name}', { name: job.title })} onClick={() => onOpen(job)}>
                       <ArrowUpRight size={16} />
                     </button>
                   </div>
@@ -1622,11 +1638,11 @@ function ResourcesWorkspace({
             })}
             {!rows.length ? (
               <Empty
-                title={isWorkforce ? 'No workforce work' : 'No inventory work'}
+                title={t(isWorkforce ? 'No workforce work' : 'No inventory work')}
                 detail={
                   isWorkforce
-                    ? 'Scheduled ledger jobs will appear here with crew readiness and time controls.'
-                    : 'Material and equipment requirements will appear here with procurement and loading controls.'
+                    ? t('Scheduled ledger jobs will appear here with crew readiness and time controls.')
+                    : t('Material and equipment requirements will appear here with procurement and loading controls.')
                 }
               />
             ) : null}

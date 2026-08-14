@@ -1,7 +1,18 @@
 import { describe, expect, it } from 'vitest'
 import { appText, normalizeLocale, portalText } from '../locale'
 import { operatorText } from '../operator-locale'
-import { currency, formatCurrency, formatDate, formatNumber, formatWeekday, roundDisplay, setDashboardLocale } from '../dashboard-format'
+import {
+  currency,
+  formatCurrency,
+  formatDate,
+  formatDateTime,
+  formatNumber,
+  formatStatus,
+  formatWeekday,
+  roundDisplay,
+  setDashboardLocale,
+  shortHash,
+} from '../dashboard-format'
 
 describe('locale contract', () => {
   it('normalizes only supported operator and portal locales', () => {
@@ -55,5 +66,16 @@ describe('locale contract', () => {
     expect(roundDisplay(1234.5)).toBe('1.234,5')
     expect(formatWeekday('2026-08-13T00:00:00Z')).toMatch(/do/i)
     expect(formatDate('2026-08-13')).toMatch(/13 aug/i)
+    expect(formatStatus('pending_approval')).toBe('wacht op goedkeuring')
+    expect(formatStatus('checked_out')).toBe('uitgegeven')
+    expect(formatStatus('worker_created')).toBe('medewerker aangemaakt')
+    expect(formatStatus('update_operator_locale')).toBe('operator-taal bijgewerkt')
+    expect(formatDate(null)).toBe('Niet ingepland')
+    expect(formatDateTime(null)).toBe('Niet vastgelegd')
+    expect(shortHash(null)).toBe('Niet vastgelegd')
+
+    setDashboardLocale('en-GB')
+    expect(formatStatus('pending_approval')).toBe('pending approval')
+    expect(formatDate(null)).toBe('Not scheduled')
   })
 })

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { ChevronRight, Eye, LoaderCircle, RefreshCw, Search, TriangleAlert, X } from 'lucide-react'
 import { formatDateTime, formatStatus, shortHash } from '../dashboard-format'
+import { operatorText } from '../operator-locale'
 import Empty from './EmptyState'
 
 const EMPTY_AUDIT_HISTORY_FILTERS = Object.freeze({ query: '', entityType: '', action: '', actor: '', from: '', until: '' })
@@ -15,7 +16,8 @@ function auditHistoryRequestPath(filters, { beforeSequence = null, includeFacets
   return `/api/ledger/audit?${parameters.toString()}`
 }
 
-export default function AuditHistory({ request, totalEvents = 0 }) {
+export default function AuditHistory({ locale = 'en-GB', request, totalEvents = 0 }) {
+  const t = (key, variables = {}) => operatorText(locale, key, variables)
   const [filters, setFilters] = useState({ ...EMPTY_AUDIT_HISTORY_FILTERS })
   const [appliedFilters, setAppliedFilters] = useState({ ...EMPTY_AUDIT_HISTORY_FILTERS })
   const [events, setEvents] = useState([])
@@ -105,7 +107,7 @@ export default function AuditHistory({ request, totalEvents = 0 }) {
   const activeFilterCount = Object.values(appliedFilters).filter((value) => String(value || '').trim()).length
   const facetOptions = (items, label) => (
     <>
-      <option value="">All {label}</option>
+      <option value="">{t('All {label}', { label: t(label) })}</option>
       {(items || []).map((item) => (
         <option key={item.value} value={item.value}>
           {formatStatus(item.value)} ({item.count})
@@ -118,14 +120,14 @@ export default function AuditHistory({ request, totalEvents = 0 }) {
     <section className="panel page-panel audit-history-panel" data-testid="audit-history-panel" aria-busy={auditLoading || undefined}>
       <div className="panel-heading audit-history-heading">
         <div>
-          <h2>Audit history</h2>
-          <p>Inspect retained operator, automation, approval, and lifecycle evidence in chain order.</p>
+          <h2>{t('Audit history')}</h2>
+          <p>{t('Inspect retained operator, automation, approval, and lifecycle evidence in chain order.')}</p>
         </div>
         <div className="audit-history-heading-actions">
-          <span className="count-badge">{events.length} loaded</span>
+          <span className="count-badge">{t('{count} loaded', { count: events.length })}</span>
           <button
             className="icon-button"
-            aria-label="Refresh audit history"
+            aria-label={t('Refresh audit history')}
             disabled={auditLoading}
             onClick={() => loadHistory(appliedFilters, { includeFacets: true })}
           >
@@ -136,35 +138,35 @@ export default function AuditHistory({ request, totalEvents = 0 }) {
       <form className="audit-filter-toolbar" data-testid="audit-history-filters" onSubmit={applyFilters}>
         <label className="search-control audit-search">
           <Search size={16} />
-          <span className="visually-hidden">Search audit history</span>
+          <span className="visually-hidden">{t('Search audit history')}</span>
           <input
             type="search"
             maxLength="120"
             value={filters.query}
             onChange={(event) => setFilters({ ...filters, query: event.target.value })}
-            placeholder="Search action, record, job, or actor"
+            placeholder={t('Search action, record, job, or actor')}
           />
         </label>
         <label>
-          <span>Record type</span>
+          <span>{t('Record type')}</span>
           <select data-testid="audit-record-type-filter" value={filters.entityType} onChange={(event) => setFilters({ ...filters, entityType: event.target.value })}>
             {facetOptions(facets.entityTypes, 'record types')}
           </select>
         </label>
         <label>
-          <span>Action</span>
+          <span>{t('Action')}</span>
           <select data-testid="audit-action-filter" value={filters.action} onChange={(event) => setFilters({ ...filters, action: event.target.value })}>
             {facetOptions(facets.actions, 'actions')}
           </select>
         </label>
         <label>
-          <span>Actor</span>
+          <span>{t('Actor')}</span>
           <select value={filters.actor} onChange={(event) => setFilters({ ...filters, actor: event.target.value })}>
             {facetOptions(facets.actors, 'actors')}
           </select>
         </label>
         <label>
-          <span>From</span>
+          <span>{t('From')}</span>
           <input
             type="date"
             value={filters.from}
@@ -173,7 +175,7 @@ export default function AuditHistory({ request, totalEvents = 0 }) {
           />
         </label>
         <label>
-          <span>Until</span>
+          <span>{t('Until')}</span>
           <input
             type="date"
             value={filters.until}
@@ -189,24 +191,26 @@ export default function AuditHistory({ request, totalEvents = 0 }) {
             onClick={clearFilters}
           >
             <X size={15} />
-            Clear
+            {t('Clear filters')}
           </button>
           <button className="primary-button" disabled={auditLoading}>
             <Search size={15} />
-            Apply
+            {t('Apply')}
           </button>
         </div>
       </form>
       <div className="audit-history-summary" aria-live="polite">
         <span>
-          {totalEvents} chained event{totalEvents === 1 ? '' : 's'} retained
+          {t(totalEvents === 1 ? '{count} chained event retained' : '{count} chained events retained', { count: totalEvents })}
         </span>
         <strong>
-          {activeFilterCount ? `${activeFilterCount} active filter${activeFilterCount === 1 ? '' : 's'}` : 'Latest chain activity'}
+          {activeFilterCount
+            ? t(activeFilterCount === 1 ? '{count} active filter' : '{count} active filters', { count: activeFilterCount })
+            : t('Latest chain activity')}
         </strong>
         {page?.newestSequence ? (
           <code>
-            #{page.newestSequence} to #{page.oldestSequence}
+            {t('#{newest} to #{oldest}', { newest: page.newestSequence, oldest: page.oldestSequence })}
           </code>
         ) : null}
       </div>
@@ -215,7 +219,7 @@ export default function AuditHistory({ request, totalEvents = 0 }) {
           <TriangleAlert size={16} />
           <span>{auditError}</span>
           <button className="secondary-button" onClick={() => loadHistory(appliedFilters, { includeFacets: true })}>
-            Retry
+            {t('Retry')}
           </button>
         </div>
       ) : null}
@@ -223,19 +227,19 @@ export default function AuditHistory({ request, totalEvents = 0 }) {
         {events.map((event) => (
           <article className="audit-history-row" role="listitem" key={event.id}>
             <div className="audit-sequence">
-              <span>Sequence</span>
+              <span>{t('Sequence')}</span>
               <strong>#{event.sequenceNumber}</strong>
               <code title={event.eventHash}>{shortHash(event.eventHash)}</code>
             </div>
             <div className="audit-event-copy">
               <div>
                 <strong>{formatStatus(event.action)}</strong>
-                <span className="tag tag-green">Chained</span>
+                <span className="tag tag-green">{t('Chained')}</span>
               </div>
               <p>
                 {formatStatus(event.entityType)} / {event.entityId}
               </p>
-              {event.jobId ? <small>Job {event.jobId}</small> : <small>Portfolio record</small>}
+              {event.jobId ? <small>{t('Job {id}', { id: event.jobId })}</small> : <small>{t('Portfolio record')}</small>}
             </div>
             <div className="audit-event-context">
               <strong>{event.actor}</strong>
@@ -243,7 +247,7 @@ export default function AuditHistory({ request, totalEvents = 0 }) {
             </div>
             <button
               className="icon-button table-action"
-              aria-label={`Inspect audit event ${event.sequenceNumber}`}
+              aria-label={t('Inspect audit event {sequence}', { sequence: event.sequenceNumber })}
               onClick={(clickEvent) => {
                 detailOpenerRef.current = clickEvent.currentTarget
                 setSelectedEvent(event)
@@ -254,12 +258,12 @@ export default function AuditHistory({ request, totalEvents = 0 }) {
           </article>
         ))}
         {!events.length && !auditLoading && !auditError ? (
-          <Empty title="No audit events match" detail="Adjust the filters or refresh to inspect the latest retained chain activity." />
+          <Empty title={t('No audit events match')} detail={t('Adjust the filters or refresh to inspect the latest retained chain activity.')} />
         ) : null}
         {auditLoading && !events.length ? (
           <div className="audit-history-loading">
             <LoaderCircle className="spin" size={22} />
-            <span>Loading retained audit history</span>
+            <span>{t('Loading retained audit history')}</span>
           </div>
         ) : null}
       </div>
@@ -270,7 +274,7 @@ export default function AuditHistory({ request, totalEvents = 0 }) {
             disabled={auditLoading}
             onClick={() => loadHistory(appliedFilters, { append: true, beforeSequence: page.nextBeforeSequence })}
           >
-            {auditLoading ? <LoaderCircle className="spin" size={15} /> : <ChevronRight size={15} />}Load older events
+            {auditLoading ? <LoaderCircle className="spin" size={15} /> : <ChevronRight size={15} />}{t('Load older events')}
           </button>
         </div>
       ) : null}
@@ -286,64 +290,64 @@ export default function AuditHistory({ request, totalEvents = 0 }) {
           >
             <div className="modal-heading">
               <div>
-                <p className="eyebrow">Chained event #{selectedEvent.sequenceNumber}</p>
+                <p className="eyebrow">{t('Chained event #{sequence}', { sequence: selectedEvent.sequenceNumber })}</p>
                 <h2 id="audit-detail-title">{formatStatus(selectedEvent.action)}</h2>
                 <p>
                   {formatDateTime(selectedEvent.createdAt)} / {selectedEvent.actor}
                 </p>
               </div>
-              <button ref={detailCloseRef} className="icon-button" aria-label="Close audit event detail" onClick={closeAuditDetail}>
+              <button ref={detailCloseRef} className="icon-button" aria-label={t('Close audit event detail')} onClick={closeAuditDetail}>
                 <X size={18} />
               </button>
             </div>
             <div className="audit-detail-body">
               <dl className="audit-detail-facts">
                 <div>
-                  <dt>Record type</dt>
+                  <dt>{t('Record type')}</dt>
                   <dd>{formatStatus(selectedEvent.entityType)}</dd>
                 </div>
                 <div>
-                  <dt>Record id</dt>
+                  <dt>{t('Record id')}</dt>
                   <dd>{selectedEvent.entityId}</dd>
                 </div>
                 <div>
-                  <dt>Job</dt>
-                  <dd>{selectedEvent.jobId || 'Portfolio record'}</dd>
+                  <dt>{t('Job')}</dt>
+                  <dd>{selectedEvent.jobId || t('Portfolio record')}</dd>
                 </div>
                 <div>
-                  <dt>Event id</dt>
+                  <dt>{t('Event id')}</dt>
                   <dd>{selectedEvent.id}</dd>
                 </div>
               </dl>
               <div className="audit-chain-proof">
                 <div>
-                  <span>Previous hash</span>
+                  <span>{t('Previous hash')}</span>
                   <code>{selectedEvent.previousHash}</code>
                 </div>
                 <ChevronRight size={18} />
                 <div>
-                  <span>Event hash</span>
+                  <span>{t('Event hash')}</span>
                   <code>{selectedEvent.eventHash}</code>
                 </div>
               </div>
               <div className="audit-payload-grid">
                 <section>
-                  <h3>Before</h3>
+                  <h3>{t('Before')}</h3>
                   <pre>{JSON.stringify(selectedEvent.before ?? null, null, 2)}</pre>
                 </section>
                 <section>
-                  <h3>After</h3>
+                  <h3>{t('After')}</h3>
                   <pre>{JSON.stringify(selectedEvent.after ?? null, null, 2)}</pre>
                 </section>
                 <section>
-                  <h3>Metadata</h3>
+                  <h3>{t('Metadata')}</h3>
                   <pre>{JSON.stringify(selectedEvent.metadata ?? null, null, 2)}</pre>
                 </section>
               </div>
             </div>
             <div className="modal-actions">
               <button className="secondary-button" onClick={closeAuditDetail}>
-                Close
+                {t('Close')}
               </button>
             </div>
           </section>

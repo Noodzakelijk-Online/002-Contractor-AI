@@ -13959,7 +13959,7 @@ function App() {
                   </p>
                 </section>
                 <LazyControlBoundary label="audit history">
-                  <AuditHistory request={api} totalEvents={auditIntegrityCapability?.eventCount || 0} />
+                  <AuditHistory locale={operatorLocale} request={api} totalEvents={auditIntegrityCapability?.eventCount || 0} />
                 </LazyControlBoundary>
                 <section className="panel page-panel archive-registry-panel" data-testid="job-archive-registry">
                   <div className="panel-heading">
