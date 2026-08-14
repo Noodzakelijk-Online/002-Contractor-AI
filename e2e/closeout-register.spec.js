@@ -16,6 +16,7 @@ async function createJob(request, title) {
 
 async function openJob(page, title) {
   await page.goto('/');
+  await page.getByLabel(/^(Language|Taal)$/).selectOption('en-GB');
   await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible();
   await page.getByRole('button', { name: `Open ${title}` }).first().click();
   const workspace = page.getByTestId('job-workspace');
@@ -109,6 +110,18 @@ test('closeout register syncs an offline punch and connects warranty and afterca
   expect(finalDetail.punchItems.filter(record => record.title === 'Door frame finish requires correction')).toHaveLength(1);
   expect(finalDetail.warrantyClaims.filter(record => record.title === 'Cabinet hinge alignment report')).toHaveLength(1);
   expect(finalDetail.aftercare.find(record => record.title === 'Seven-day installation check').status).toBe('completed');
+
+  await page.locator('header').getByLabel('Language', { exact: true }).selectOption('nl-NL');
+  await expect(register.getByRole('heading', { name: 'Oplevering en nazorg' })).toBeVisible();
+  await expect(register.getByText('Seven-day installation check')).toBeVisible();
+  await expect(register.getByText('Client confirmed normal operation; no new issue or commitment was recorded.')).toBeVisible();
+  await register.getByRole('tab', { name: /Garantie/ }).click();
+  await expect(register.getByText('Cabinet hinge alignment report')).toBeVisible();
+  await expect(register.getByText('Client reported that the retained cabinet door does not close evenly.')).toBeVisible();
+  await register.getByRole('tab', { name: /Opleverpunten/ }).click();
+  await expect(register.getByText('Door frame finish requires correction')).toBeVisible();
+  await expect(register.getByText('Paint edge is incomplete at the retained frame location.')).toBeVisible();
+  await page.locator('header').getByLabel('Taal', { exact: true }).selectOption('en-GB');
 
   await page.setViewportSize({ width: 390, height: 844 });
   const geometry = await register.evaluate(element => ({

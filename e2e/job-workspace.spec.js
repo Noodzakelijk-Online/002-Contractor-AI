@@ -1774,6 +1774,7 @@ test('clients workspace prepares closeout and aftercare without delivery or book
   const dueAftercare = await dueAftercareResponse.json();
 
   await page.goto('/');
+  await page.getByLabel(/^(Language|Taal)$/).selectOption('en-GB');
   await page.getByRole('button', { name: 'Clients', exact: true }).click();
   const clients = page.getByTestId('client-workspace');
   await expect(clients.getByRole('heading', { name: 'Client success', exact: true })).toBeVisible();
@@ -1832,6 +1833,16 @@ test('clients workspace prepares closeout and aftercare without delivery or book
   const recurringRow = clients.locator('.client-item').filter({ hasText: recurringJob.job.title });
   await recurringRow.getByRole('button', { name: `Draft recurring plan for ${recurringJob.job.title}` }).click();
   await expect(page.getByText('Recurring-service proposal retained as an internal draft. Nothing was booked or offered to the client.')).toBeVisible();
+
+  await page.locator('header').getByLabel('Language', { exact: true }).selectOption('nl-NL');
+  await expect(clients.getByRole('heading', { name: 'Klantbeheer', exact: true })).toBeVisible();
+  handoverRow = clients.locator('.client-item').filter({ hasText: handoverJob.job.title });
+  await expect(handoverRow).toContainText(handoverJob.job.title);
+  await expect(handoverRow.getByRole('link', { name: `Overdrachtsdossier downloaden voor ${handoverJob.job.title}` })).toBeVisible();
+  await expect(handoverRow.getByText('Dossier actueel')).toBeVisible();
+  aftercareRow = clients.locator('.client-item').filter({ hasText: aftercareJob.job.title });
+  await expect(aftercareRow).toContainText(aftercareJob.job.title);
+  await page.locator('header').getByLabel('Taal', { exact: true }).selectOption('en-GB');
 
   const closeoutDetailResponse = await request.get(`/api/ledger/jobs/${closeoutJob.job.id}`);
   expect(closeoutDetailResponse.ok()).toBeTruthy();

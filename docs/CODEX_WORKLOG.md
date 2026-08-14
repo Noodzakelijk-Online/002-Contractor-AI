@@ -1,5 +1,19 @@
 # Codex Worklog
 
+- Localized the governed quality and closeout chain in Dutch and English:
+  before/during/after photo evidence, installation and quality-control inspection
+  checklists, punch items, warranty claims, aftercare, client feedback, handover,
+  and recurring-service preparation. Retained titles, observations, measurements,
+  witnesses, locations, comments, filenames, and other operator evidence remain
+  verbatim across language changes.
+- Expanded the lazy specialist operator catalog from 1,416 to 1,730 unique keys
+  with no duplicates or missing literal keys for the targeted controls. Existing
+  browser journeys now prove Dutch rendering and an English round trip after the
+  full approval-backed quality and closeout lifecycles.
+- Fixed a preference race where a background refresh started before a successful
+  locale change could later restore its older session snapshot. The active
+  operator choice now wins for the current session, failed writes roll back, and
+  sign-in/sign-out clear the override.
 - Localized the complete governed daily execution chain in Dutch and English:
   daily start huddles and end-of-day reports, approved production baselines,
   offline installed-output capture and reversals, and regiewerk quantity,

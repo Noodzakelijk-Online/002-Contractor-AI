@@ -16,6 +16,7 @@ async function createJob(request, title) {
 
 async function openJob(page, title) {
   await page.goto('/');
+  await page.getByLabel(/^(Language|Taal)$/).selectOption('en-GB');
   await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible();
   await page.getByRole('button', { name: `Open ${title}` }).first().click();
   const workspace = page.getByTestId('job-workspace');
@@ -54,7 +55,7 @@ test('operator schedules, completes, approves, and reopens an inspection checkli
   }
   await checklist.getByLabel('Inspection summary').fill('Every retained item was checked against the current work and available evidence.');
   await checklist.getByRole('button', { name: 'Submit for review' }).click();
-  await expect(page.getByText(/0 failed item\(s\) retained.*waiting for approval/i)).toBeVisible();
+  await expect(page.getByText(/0 failed items retained.*waiting for approval/i)).toBeVisible();
 
   let detailResponse = await request.get(`/api/ledger/jobs/${intake.job.id}`);
   expect(detailResponse.ok()).toBeTruthy();
@@ -175,7 +176,7 @@ test('operator runs an installation hold point from task binding through release
   }
   await checklist.getByLabel('Inspection summary').fill('All hold-point acceptance criteria were checked against retained field evidence.');
   await checklist.getByRole('button', { name: 'Submit for review' }).click();
-  await expect(page.getByText(/0 failed item\(s\) retained.*waiting for approval/i)).toBeVisible();
+  await expect(page.getByText(/0 failed items retained.*waiting for approval/i)).toBeVisible();
 
   let detailResponse = await request.get(`/api/ledger/jobs/${intake.job.id}`);
   expect(detailResponse.ok()).toBeTruthy();
@@ -204,6 +205,12 @@ test('operator runs an installation hold point from task binding through release
   control = workspace.getByTestId('inspection-checklist-control');
   const releasedRow = control.locator('.inspection-checklist-row').filter({ hasText: 'Installation quality control' }).first();
   await expect(releasedRow.getByText('released', { exact: true })).toBeVisible();
+  await page.locator('header').getByLabel('Language', { exact: true }).selectOption('nl-NL');
+  await expect(control.getByRole('heading', { name: 'Inspectiechecklists' })).toBeVisible();
+  await expect(releasedRow.getByText('vrijgegeven', { exact: true })).toBeVisible();
+  await expect(releasedRow).toContainText('Installation quality control');
+  await expect(releasedRow).toContainText('Building C / Level 2 / Grid A3');
+  await page.locator('header').getByLabel('Taal', { exact: true }).selectOption('en-GB');
   detailResponse = await request.get(`/api/ledger/jobs/${intake.job.id}`);
   detail = (await detailResponse.json()).job;
   expect(detail.tasks.find(candidate => candidate.id === task.id).status).toBe('completed');

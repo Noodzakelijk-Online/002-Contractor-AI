@@ -2596,6 +2596,7 @@ function ClientsWorkspace({ directory, onCreateClient, onEditClient, ...props })
 function ClientSuccessWorkspace({
   clients,
   jobs,
+  locale,
   canCoordinate,
   canApprove,
   submitting,
@@ -2607,42 +2608,43 @@ function ClientSuccessWorkspace({
   onOpenApprovals,
   onOpen,
 }) {
+  const t = (key, variables = {}) => operatorText(locale, key, variables)
   const rows = clients?.jobs || EMPTY_LIST
   const summary = clients?.summary || {}
   return (
     <section className="panel page-panel client-workspace" data-testid="client-workspace">
       <div className="panel-heading">
         <div>
-          <h2>Client success</h2>
-          <p>Coordinate decisions, handover, punch, warranty, aftercare, and recurring service through retained approval gates.</p>
+          <h2>{t('Client success')}</h2>
+          <p>{t('Coordinate decisions, handover, punch, warranty, aftercare, and recurring service through retained approval gates.')}</p>
         </div>
         <span className="count-badge">{rows.length}</span>
       </div>
-      <div className="client-summary" aria-label="Client success summary">
+      <div className="client-summary" aria-label={t('Client success summary')}>
         <div>
-          <span>Waiting client</span>
+          <span>{t('Waiting client')}</span>
           <strong>{summary.waitingClient || 0}</strong>
         </div>
         <div>
-          <span>Handover ready</span>
+          <span>{t('Handover ready')}</span>
           <strong>{summary.handoverReady || 0}</strong>
         </div>
         <div>
-          <span>Closeout ready</span>
+          <span>{t('Closeout ready')}</span>
           <strong>{summary.closeoutReady || 0}</strong>
         </div>
         <div>
-          <span>Punch / warranty</span>
+          <span>{t('Punch / warranty')}</span>
           <strong>{summary.punchWarranty || 0}</strong>
         </div>
         <div>
-          <span>Aftercare due</span>
+          <span>{t('Aftercare due')}</span>
           <strong>{summary.aftercareDue || 0}</strong>
         </div>
       </div>
       <div className="client-list">
         {rows.map((item) => {
-          const job = jobs.find((candidate) => candidate.id === item.jobId) || { id: item.jobId, title: item.jobTitle || 'Ledger job' }
+          const job = jobs.find((candidate) => candidate.id === item.jobId) || { id: item.jobId, title: item.jobTitle || t('Ledger job') }
           const action = (type) => item.nextActions?.find((candidate) => candidate.type === type)
           const canAct = canCoordinate && !item.flags?.approvalRequired
           const canPrepareCloseout = canAct && item.flags?.closeoutReady
@@ -2659,22 +2661,22 @@ function ClientSuccessWorkspace({
             <article className="client-item" key={item.jobId}>
               <div className="client-copy">
                 <div className="client-title">
-                  <h3>{item.jobTitle || 'Ledger job'}</h3>
-                  <span className={`status status-${item.clientStatus}`}>{formatStatus(item.clientStatus)}</span>
+                  <h3>{item.jobTitle || t('Ledger job')}</h3>
+                  <span className={`status status-${item.clientStatus}`}>{t(formatStatus(item.clientStatus))}</span>
                 </div>
-                <p>{item.nextAction || 'Client records are stable.'}</p>
+                <p>{t(item.nextAction || 'Client records are stable.')}</p>
                 <div className="client-values">
                   <span>
-                    Client value <strong>{currency.format(item.money?.clientValue || 0)}</strong>
+                    {t('Client value')} <strong>{currency.format(item.money?.clientValue || 0)}</strong>
                   </span>
                   <span>
-                    Selections <strong>{item.counts?.pendingSelections || 0}</strong>
+                    {t('Selections')} <strong>{item.counts?.pendingSelections || 0}</strong>
                   </span>
                   <span>
-                    Waiting replies <strong>{item.counts?.waitingReplies || 0}</strong>
+                    {t('Waiting replies')} <strong>{item.counts?.waitingReplies || 0}</strong>
                   </span>
                   <span>
-                    Open service{' '}
+                    {t('Open service')}{' '}
                     <strong>
                       {(item.counts?.openPunchItems || 0) + (item.counts?.openWarrantyClaims || 0) + (item.counts?.openAftercare || 0)}
                     </strong>
@@ -2683,30 +2685,40 @@ function ClientSuccessWorkspace({
                 <div className="client-flags">
                   {item.counts?.pendingApprovals ? (
                     <span className="tag tag-amber">
-                      {item.counts.pendingApprovals} approval{item.counts.pendingApprovals === 1 ? '' : 's'}
+                      {item.counts.pendingApprovals === 1
+                        ? t('{count} approval', { count: item.counts.pendingApprovals })
+                        : t('{count} approvals', { count: item.counts.pendingApprovals })}
                     </span>
                   ) : null}
                   {item.counts?.overdueSelections ? (
-                    <span className="tag tag-amber">{item.counts.overdueSelections} selection overdue</span>
+                    <span className="tag tag-amber">{item.counts.overdueSelections === 1
+                      ? t('{count} selection overdue', { count: item.counts.overdueSelections })
+                      : t('{count} selections overdue', { count: item.counts.overdueSelections })}</span>
                   ) : null}
-                  {item.counts?.overdueReplies ? <span className="tag tag-amber">{item.counts.overdueReplies} reply overdue</span> : null}
-                  {item.counts?.dueAftercare ? <span className="tag">{item.counts.dueAftercare} aftercare due</span> : null}
+                  {item.counts?.overdueReplies ? <span className="tag tag-amber">{item.counts.overdueReplies === 1
+                    ? t('{count} reply overdue', { count: item.counts.overdueReplies })
+                    : t('{count} replies overdue', { count: item.counts.overdueReplies })}</span> : null}
+                  {item.counts?.dueAftercare ? <span className="tag">{t('{count} aftercare due', { count: item.counts.dueAftercare })}</span> : null}
                   {item.counts?.handoverBlockers ? (
                     <span className="tag tag-amber">
-                      {item.counts.handoverBlockers} handover blocker{item.counts.handoverBlockers === 1 ? '' : 's'}
+                      {item.counts.handoverBlockers === 1
+                        ? t('{count} handover blocker', { count: item.counts.handoverBlockers })
+                        : t('{count} handover blockers', { count: item.counts.handoverBlockers })}
                     </span>
                   ) : null}
                   {item.counts?.handoverMissing ? (
                     <span className="tag">
-                      {item.counts.handoverMissing} handover requirement{item.counts.handoverMissing === 1 ? '' : 's'}
+                      {item.counts.handoverMissing === 1
+                        ? t('{count} handover requirement', { count: item.counts.handoverMissing })
+                        : t('{count} handover requirements', { count: item.counts.handoverMissing })}
                     </span>
                   ) : null}
                   {item.latest?.handoverPackage ? (
                     <span className={item.handoverReadiness?.currentPackageId ? 'tag tag-green' : 'tag tag-amber'}>
-                      {item.handoverReadiness?.currentPackageId ? 'Dossier current' : 'Dossier refresh due'}
+                      {item.handoverReadiness?.currentPackageId ? t('Dossier current') : t('Dossier refresh due')}
                     </span>
                   ) : null}
-                  {item.counts?.handoverDelivered ? <span className="tag tag-green">Handover delivered</span> : null}
+                  {item.counts?.handoverDelivered ? <span className="tag tag-green">{t('Handover delivered')}</span> : null}
                 </div>
               </div>
               <div className="client-actions">
@@ -2723,109 +2735,109 @@ function ClientSuccessWorkspace({
                     }
                   >
                     <ShieldCheck size={16} />
-                    Review approval
+                    {t('Review approval')}
                   </button>
                 ) : null}
                 {canPrepareCloseout ? (
                   <button
                     className="secondary-button"
-                    aria-label={`Prepare closeout for ${job.title}`}
+                    aria-label={t('Prepare closeout for {job}', { job: job.title })}
                     disabled={submitting}
                     onClick={() => onPrepareCloseout(item)}
                   >
                     <Archive size={16} />
-                    Prepare closeout
+                    {t('Prepare closeout')}
                   </button>
                 ) : null}
                 {canPrepareHandover ? (
                   <button
                     className="primary-button"
-                    aria-label={`Prepare handover dossier for ${job.title}`}
+                    aria-label={t('Prepare handover dossier for {job}', { job: job.title })}
                     disabled={submitting}
                     onClick={() => onPrepareHandover(item)}
                   >
                     <PackageCheck size={16} />
-                    Prepare dossier
+                    {t('Prepare dossier')}
                   </button>
                 ) : null}
                 {item.latest?.handoverPackage ? (
                   <a
                     className="secondary-button"
-                    aria-label={`Download handover dossier for ${job.title}`}
+                    aria-label={t('Download handover dossier for {job}', { job: job.title })}
                     href={`/api/ledger/documents/${encodeURIComponent(item.latest.handoverPackage.id)}/issue-package`}
                     download
                   >
                     <FileDown size={16} />
-                    Download dossier
+                    {t('Download dossier')}
                   </a>
                 ) : null}
                 {canDraftFollowup ? (
                   <button
                     className="secondary-button"
-                    aria-label={`Draft client follow-up for ${job.title}`}
+                    aria-label={t('Draft client follow-up for {job}', { job: job.title })}
                     disabled={submitting}
                     onClick={() => onDraftFollowup(item)}
                   >
                     <MessageSquareText size={16} />
-                    Draft follow-up
+                    {t('Draft follow-up')}
                   </button>
                 ) : null}
                 {selectionAction ? (
                   <button
                     className="secondary-button"
-                    aria-label={`Record client selection for ${job.title}`}
+                    aria-label={t('Record client selection for {job}', { job: job.title })}
                     disabled={submitting}
                     onClick={() => onLifecycle(item, 'selection', selectionAction.selectionId)}
                   >
                     <ClipboardCheck size={16} />
-                    Record selection
+                    {t('Record selection')}
                   </button>
                 ) : null}
                 {punchAction ? (
                   <button
                     className="secondary-button"
-                    aria-label={`Request punch resolution for ${job.title}`}
+                    aria-label={t('Request punch resolution for {job}', { job: job.title })}
                     disabled={submitting}
                     onClick={() => onLifecycle(item, 'punch_item', punchAction.punchItemId)}
                   >
                     <ShieldCheck size={16} />
-                    Punch review
+                    {t('Punch review')}
                   </button>
                 ) : null}
                 {warrantyAction ? (
                   <button
                     className="secondary-button"
-                    aria-label={`Request warranty resolution for ${job.title}`}
+                    aria-label={t('Request warranty resolution for {job}', { job: job.title })}
                     disabled={submitting}
                     onClick={() => onLifecycle(item, 'warranty_claim', warrantyAction.warrantyClaimId)}
                   >
                     <ShieldCheck size={16} />
-                    Warranty review
+                    {t('Warranty review')}
                   </button>
                 ) : null}
                 {aftercareAction ? (
                   <button
                     className="secondary-button"
-                    aria-label={`Complete aftercare for ${job.title}`}
+                    aria-label={t('Complete aftercare for {job}', { job: job.title })}
                     disabled={submitting}
                     onClick={() => onLifecycle(item, 'aftercare', aftercareAction.aftercareId)}
                   >
                     <BadgeCheck size={16} />
-                    Complete aftercare
+                    {t('Complete aftercare')}
                   </button>
                 ) : null}
                 {canDraftRecurring ? (
                   <button
                     className="secondary-button"
-                    aria-label={`Draft recurring plan for ${job.title}`}
+                    aria-label={t('Draft recurring plan for {job}', { job: job.title })}
                     disabled={submitting}
                     onClick={() => onDraftRecurring(item)}
                   >
                     <RefreshCw size={16} />
-                    Service plan
+                    {t('Service plan')}
                   </button>
                 ) : null}
-                <button className="icon-button table-action" aria-label={`Open ${job.title}`} onClick={() => onOpen(job)}>
+                <button className="icon-button table-action" aria-label={t('Open {job}', { job: job.title })} onClick={() => onOpen(job)}>
                   <ArrowUpRight size={16} />
                 </button>
               </div>
@@ -2834,8 +2846,8 @@ function ClientSuccessWorkspace({
         })}
         {!rows.length ? (
           <Empty
-            title="No client work"
-            detail="Client decisions, closeout, warranty, and aftercare records will appear here when action is needed."
+            title={t('No client work')}
+            detail={t('Client decisions, closeout, warranty, and aftercare records will appear here when action is needed.')}
           />
         ) : null}
       </div>
@@ -3260,6 +3272,7 @@ function ProjectControls({
 
 function PhotoEvidenceControl({
   job,
+  locale,
   canCoordinate,
   canApprove,
   submitting,
@@ -3267,6 +3280,7 @@ function PhotoEvidenceControl({
   onRequestReview,
   onOpenApprovals,
 }) {
+  const t = (key, variables = {}) => operatorText(locale, key, variables)
   const [scheduling, setScheduling] = useState(false)
   const [draft, setDraft] = useState(() => emptyPhotoEvidenceSetDraft())
   const sets = job.photoEvidenceSets || EMPTY_LIST
@@ -3289,7 +3303,7 @@ function PhotoEvidenceControl({
       taskId,
       assignmentId: assignment?.id || '',
       assignedWorkerId: assignment?.workerId || '',
-      title: task ? `${task.title} photographic evidence` : '',
+      title: task ? t('{task} photographic evidence', { task: task.title }) : '',
     })
   }
 
@@ -3309,37 +3323,37 @@ function PhotoEvidenceControl({
       <div className="section-heading field-risk-heading">
         <Camera size={18} />
         <div>
-          <h3>Before, during, and after evidence</h3>
-          <p>Task-bound, checksum-protected field photos with independent release.</p>
+          <h3>{t('Before, during, and after evidence')}</h3>
+          <p>{t('Task-bound, checksum-protected field photos with independent release.')}</p>
         </div>
         {canCoordinate ? (
           <button type="button" className="secondary-button" disabled={submitting} onClick={() => setScheduling(current => !current)}>
             {scheduling ? <X size={15} /> : <Plus size={15} />}
-            {scheduling ? 'Cancel' : 'Schedule set'}
+            {scheduling ? t('Cancel') : t('Schedule set')}
           </button>
         ) : null}
       </div>
 
-      <div className="field-risk-summary" aria-label="Photo evidence summary">
-        <div><span>Task holds</span><strong>{blocked}</strong></div>
-        <div><span>Ready for review</span><strong>{readyForReview}</strong></div>
-        <div><span>Pending review</span><strong>{pending}</strong></div>
-        <div><span>Released</span><strong>{released}</strong></div>
+      <div className="field-risk-summary" aria-label={t('Photo evidence summary')}>
+        <div><span>{t('Task holds')}</span><strong>{blocked}</strong></div>
+        <div><span>{t('Ready for review')}</span><strong>{readyForReview}</strong></div>
+        <div><span>{t('Pending review')}</span><strong>{pending}</strong></div>
+        <div><span>{t('Released')}</span><strong>{released}</strong></div>
       </div>
 
       {scheduling ? (
         <form className="field-risk-form form-grid compact-form" data-testid="photo-evidence-schedule-form" onSubmit={submitSchedule}>
           <label>
-            Task
+            {t('Task')}
             <select required value={draft.taskId} onChange={(event) => selectTask(event.target.value)}>
-              <option value="">Select a task with an assigned worker</option>
+              <option value="">{t('Select a task with an assigned worker')}</option>
               {activeTasks.map(task => (
                 <option key={task.id} value={task.id}>{task.title}</option>
               ))}
             </select>
           </label>
           <label>
-            Assigned worker
+            {t('Assigned worker')}
             <select
               required
               value={draft.assignmentId}
@@ -3352,7 +3366,7 @@ function PhotoEvidenceControl({
                 })
               }}
             >
-              <option value="">Select retained assignment</option>
+              <option value="">{t('Select retained assignment')}</option>
               {activeAssignments.map(assignment => (
                 <option key={assignment.id} value={assignment.id}>
                   {assignment.workerName || assignment.workerId} / {assignment.role}
@@ -3361,21 +3375,21 @@ function PhotoEvidenceControl({
             </select>
           </label>
           <label className="form-span">
-            Evidence title
+            {t('Evidence title')}
             <input required minLength="3" maxLength="240" value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} />
           </label>
           <label className="form-span">
-            Exact work location
-            <input required minLength="2" maxLength="240" value={draft.workLocation} onChange={(event) => setDraft({ ...draft, workLocation: event.target.value })} placeholder="Building, level, room, grid, elevation, or asset" />
+            {t('Exact work location')}
+            <input required minLength="2" maxLength="240" value={draft.workLocation} onChange={(event) => setDraft({ ...draft, workLocation: event.target.value })} placeholder={t('Building, level, room, grid, elevation, or asset')} />
           </label>
           <label className="form-span">
-            Field instructions
-            <textarea maxLength="600" value={draft.notes} onChange={(event) => setDraft({ ...draft, notes: event.target.value })} placeholder="Required viewpoints, visible references, or access constraints." />
+            {t('Field instructions')}
+            <textarea maxLength="600" value={draft.notes} onChange={(event) => setDraft({ ...draft, notes: event.target.value })} placeholder={t('Required viewpoints, visible references, or access constraints.')} />
           </label>
-          <p className="workflow-note form-span">Scheduling activates a task-completion hold. Only the assigned worker can capture the governed sequence; an independent approver must release it.</p>
+          <p className="workflow-note form-span">{t('Scheduling activates a task-completion hold. Only the assigned worker can capture the governed sequence; an independent approver must release it.')}</p>
           <div className="form-actions">
             <button className="primary-button" disabled={submitting || !draft.taskId || !draft.assignmentId || !draft.assignedWorkerId}>
-              <Camera size={15} />Schedule evidence set
+              <Camera size={15} />{t('Schedule evidence set')}
             </button>
           </div>
         </form>
@@ -3390,41 +3404,41 @@ function PhotoEvidenceControl({
                 <small>{set.workLocation} / {set.assignedWorkerName || set.assignedWorkerId}</small>
               </div>
               <span className={`tag ${set.readyForTaskCompletion ? 'tag-green' : set.effectiveStatus === 'stale' || set.effectiveStatus === 'integrity_invalid' ? 'tag-red' : 'tag-amber'}`}>
-                {formatStatus(set.effectiveStatus)}
+                {t(formatStatus(set.effectiveStatus))}
               </span>
             </div>
-            <div className="photo-evidence-phases" aria-label={`${set.title} phase evidence`}>
+            <div className="photo-evidence-phases" aria-label={t('{title} phase evidence', { title: set.title })}>
               {['before', 'during', 'after'].map(phase => {
                 const capture = set.captures?.find(item => item.phase === phase)
                 return (
                   <div className={capture ? 'complete' : 'missing'} key={phase}>
-                    <span>{formatStatus(phase)}</span>
-                    <strong>{capture ? formatDateTime(capture.capturedAt) : 'Missing'}</strong>
+                    <span>{t(formatStatus(phase))}</span>
+                    <strong>{capture ? formatDateTime(capture.capturedAt) : t('Missing')}</strong>
                     {capture ? (
                       <a href={`/api/ledger/documents/${encodeURIComponent(capture.documentId)}/content`} target="_blank" rel="noreferrer">
-                        {capture.document?.filename || 'Open photo'}
+                        {capture.document?.filename || t('Open photo')}
                       </a>
                     ) : null}
                   </div>
                 )
               })}
             </div>
-            {!set.sourceCurrent ? <p className="installation-qc-blocked"><TriangleAlert size={15} />Task, assignment, worker, or location source changed. Release remains blocked.</p> : null}
-            {!set.integrityValid || !set.captureIntegrityValid ? <p className="installation-qc-blocked"><TriangleAlert size={15} />Retained evidence failed integrity verification.</p> : null}
+            {!set.sourceCurrent ? <p className="installation-qc-blocked"><TriangleAlert size={15} />{t('Task, assignment, worker, or location source changed. Release remains blocked.')}</p> : null}
+            {!set.integrityValid || !set.captureIntegrityValid ? <p className="installation-qc-blocked"><TriangleAlert size={15} />{t('Retained evidence failed integrity verification.')}</p> : null}
             <div className="form-actions">
               {canCoordinate && set.status === 'captures_complete' && set.complete && set.sourceCurrent && set.integrityValid && set.captureIntegrityValid ? (
                 <button type="button" className="primary-button" disabled={submitting} onClick={() => onRequestReview(set.id, { entryKey: createFieldEvidenceDraftId() })}>
-                  <ShieldCheck size={15} />Request independent review
+                  <ShieldCheck size={15} />{t('Request independent review')}
                 </button>
               ) : null}
               {canApprove && set.status === 'pending_review' && set.latestApprovalId ? (
                 <button type="button" className="secondary-button" onClick={() => onOpenApprovals({ jobId: job.id, approvalId: set.latestApprovalId })}>
-                  <LockKeyhole size={15} />Open approval
+                  <LockKeyhole size={15} />{t('Open approval')}
                 </button>
               ) : null}
             </div>
           </article>
-        )) : <Empty title="No governed photo evidence" detail="Schedule a before, during, and after set against a task with an active assigned worker." />}
+        )) : <Empty title={t('No governed photo evidence')} detail={t('Schedule a before, during, and after set against a task with an active assigned worker.')} />}
       </div>
     </section>
   )
@@ -3433,6 +3447,7 @@ function PhotoEvidenceControl({
 function InspectionChecklistControl({
   job,
   templates,
+  locale,
   canCoordinate,
   canApprove,
   fieldScoped,
@@ -3443,6 +3458,7 @@ function InspectionChecklistControl({
   onSubmit,
   onOpenApprovals,
 }) {
+  const t = (key, variables = {}) => operatorText(locale, key, variables)
   const checklistInspections = (job.inspections || EMPTY_LIST).filter((inspection) => inspection.checklist?.configured)
   const activeAssignments = (job.assignments || EMPTY_LIST).filter((assignment) =>
     !['released', 'cancelled', 'completed', 'closed', 'rejected', 'pending_approval'].includes(assignment.status)
@@ -3451,14 +3467,14 @@ function InspectionChecklistControl({
     !['completed', 'cancelled', 'canceled', 'closed'].includes(task.status)
   )
   const installationStages = [
-    ['pre_installation', 'Pre-installation'],
-    ['first_work', 'First work'],
-    ['in_process', 'In process'],
-    ['pre_concealment', 'Pre-concealment'],
-    ['testing', 'Testing'],
-    ['final_acceptance', 'Final acceptance'],
+    ['pre_installation', t('Pre-installation')],
+    ['first_work', t('First work')],
+    ['in_process', t('In process')],
+    ['pre_concealment', t('Pre-concealment')],
+    ['testing', t('Testing')],
+    ['final_acceptance', t('Final acceptance')],
   ]
-  const controlPoints = [['check', 'Check'], ['witness', 'Witness'], ['hold', 'Hold']]
+  const controlPoints = [['check', t('Check')], ['witness', t('Witness')], ['hold', t('Hold')]]
   const [scheduleDraft, setScheduleDraft] = useState(null)
   const [templateDraft, setTemplateDraft] = useState(null)
   const [activeInspection, setActiveInspection] = useState(null)
@@ -3613,16 +3629,16 @@ function InspectionChecklistControl({
       <div className="section-heading inspection-checklist-heading">
         <ClipboardCheck size={18} />
         <div>
-          <h3>Inspection checklists</h3>
-          <p>Versioned questions, field responses, corrective observations, and approval-backed sign-off.</p>
+          <h3>{t('Inspection checklists')}</h3>
+          <p>{t('Versioned questions, field responses, corrective observations, and approval-backed sign-off.')}</p>
         </div>
         {canCoordinate ? (
           <div className="inspection-checklist-heading-actions">
-            <button type="button" className="icon-button" aria-label="Create inspection template" title="Create inspection template" onClick={() => { setTemplateDraft(resetTemplateDraft()); setScheduleDraft(null); setActiveInspection(null) }}>
+            <button type="button" className="icon-button" aria-label={t('Create inspection template')} title={t('Create inspection template')} onClick={() => { setTemplateDraft(resetTemplateDraft()); setScheduleDraft(null); setActiveInspection(null) }}>
               <Plus size={17} />
             </button>
             <button type="button" className="secondary-button" disabled={!templates.length || submitting} onClick={beginSchedule}>
-              <CalendarDays size={15} />Schedule
+              <CalendarDays size={15} />{t('Schedule')}
             </button>
           </div>
         ) : null}
@@ -3631,63 +3647,63 @@ function InspectionChecklistControl({
       {templateDraft ? (
         <form className="inspection-template-editor" data-testid="inspection-template-form" onSubmit={submitTemplate}>
           <div className="form-grid compact-form">
-            <label>Template name<input autoFocus required minLength="3" maxLength="160" value={templateDraft.name} onChange={(event) => setTemplateDraft({ ...templateDraft, name: event.target.value })} /></label>
-            <label>Template key<input required pattern="[A-Za-z0-9_ -]+" value={templateDraft.templateKey} onChange={(event) => setTemplateDraft({ ...templateDraft, templateKey: event.target.value })} placeholder="facade_quality" /></label>
-            <label>Type<input required value={templateDraft.inspectionType} onChange={(event) => setTemplateDraft({ ...templateDraft, inspectionType: event.target.value })} /></label>
-            <label>Discipline<select value={templateDraft.discipline} onChange={(event) => setTemplateDraft({ ...templateDraft, discipline: event.target.value })}><option value="quality">Quality</option><option value="safety">Safety</option><option value="closeout">Closeout</option><option value="general">General</option></select></label>
+            <label>{t('Template name')}<input autoFocus required minLength="3" maxLength="160" value={templateDraft.name} onChange={(event) => setTemplateDraft({ ...templateDraft, name: event.target.value })} /></label>
+            <label>{t('Template key')}<input required pattern="[A-Za-z0-9_ -]+" value={templateDraft.templateKey} onChange={(event) => setTemplateDraft({ ...templateDraft, templateKey: event.target.value })} placeholder="facade_quality" /></label>
+            <label>{t('Type')}<input required value={templateDraft.inspectionType} onChange={(event) => setTemplateDraft({ ...templateDraft, inspectionType: event.target.value })} /></label>
+            <label>{t('Discipline')}<select value={templateDraft.discipline} onChange={(event) => setTemplateDraft({ ...templateDraft, discipline: event.target.value })}><option value="quality">{t('Quality')}</option><option value="safety">{t('Safety')}</option><option value="closeout">{t('Closeout')}</option><option value="general">{t('General')}</option></select></label>
             <label className="checkbox-label form-span"><input type="checkbox" checked={templateDraft.installationQc} onChange={(event) => setTemplateDraft({
               ...templateDraft,
               installationQc: event.target.checked,
               inspectionType: event.target.checked ? 'installation_qc' : templateDraft.inspectionType,
               discipline: event.target.checked ? 'quality' : templateDraft.discipline,
-            })} />Govern task completion as installation QC</label>
+            })} />{t('Govern task completion as installation QC')}</label>
             {templateDraft.installationQc ? (
               <>
-                <label>Default installation stage<select value={templateDraft.defaultInstallationStage} onChange={(event) => setTemplateDraft({ ...templateDraft, defaultInstallationStage: event.target.value })}>{installationStages.map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label>
-                <label>Default control point<select value={templateDraft.defaultControlPoint} onChange={(event) => setTemplateDraft({ ...templateDraft, defaultControlPoint: event.target.value })}>{controlPoints.map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label>
+                <label>{t('Default installation stage')}<select value={templateDraft.defaultInstallationStage} onChange={(event) => setTemplateDraft({ ...templateDraft, defaultInstallationStage: event.target.value })}>{installationStages.map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label>
+                <label>{t('Default control point')}<select value={templateDraft.defaultControlPoint} onChange={(event) => setTemplateDraft({ ...templateDraft, defaultControlPoint: event.target.value })}>{controlPoints.map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label>
               </>
             ) : null}
           </div>
           <fieldset className="inspection-template-items">
-            <legend>Checklist items</legend>
+            <legend>{t('Checklist items')}</legend>
             {templateDraft.items.map((item, index) => (
               <div className="inspection-template-item" key={`${item.key}-${index}`}>
-                <label className="inspection-template-prompt">Prompt<input required minLength="3" maxLength="300" value={item.prompt} onChange={(event) => setTemplateDraft({ ...templateDraft, items: templateDraft.items.map((candidate, itemIndex) => itemIndex === index ? { ...candidate, prompt: event.target.value } : candidate) })} /></label>
-                {templateDraft.installationQc ? <label className="inspection-template-criteria">Acceptance criteria<textarea required minLength="3" maxLength="600" value={item.acceptanceCriteria} onChange={(event) => setTemplateDraft({ ...templateDraft, items: templateDraft.items.map((candidate, itemIndex) => itemIndex === index ? { ...candidate, acceptanceCriteria: event.target.value } : candidate) })} /></label> : null}
-                <label>Failure severity<select value={item.failureSeverity} onChange={(event) => setTemplateDraft({ ...templateDraft, items: templateDraft.items.map((candidate, itemIndex) => itemIndex === index ? { ...candidate, failureSeverity: event.target.value } : candidate) })}><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="critical">Critical</option></select></label>
-                {templateDraft.installationQc ? <label>Control point<select value={item.controlPoint} onChange={(event) => setTemplateDraft({ ...templateDraft, items: templateDraft.items.map((candidate, itemIndex) => itemIndex === index ? { ...candidate, controlPoint: event.target.value } : candidate) })}>{controlPoints.map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label> : null}
-                <label className="checkbox-label"><input type="checkbox" checked={item.allowNotApplicable} onChange={(event) => setTemplateDraft({ ...templateDraft, items: templateDraft.items.map((candidate, itemIndex) => itemIndex === index ? { ...candidate, allowNotApplicable: event.target.checked } : candidate) })} />Allow N/A</label>
+                <label className="inspection-template-prompt">{t('Prompt')}<input required minLength="3" maxLength="300" value={item.prompt} onChange={(event) => setTemplateDraft({ ...templateDraft, items: templateDraft.items.map((candidate, itemIndex) => itemIndex === index ? { ...candidate, prompt: event.target.value } : candidate) })} /></label>
+                {templateDraft.installationQc ? <label className="inspection-template-criteria">{t('Acceptance criteria')}<textarea required minLength="3" maxLength="600" value={item.acceptanceCriteria} onChange={(event) => setTemplateDraft({ ...templateDraft, items: templateDraft.items.map((candidate, itemIndex) => itemIndex === index ? { ...candidate, acceptanceCriteria: event.target.value } : candidate) })} /></label> : null}
+                <label>{t('Failure severity')}<select value={item.failureSeverity} onChange={(event) => setTemplateDraft({ ...templateDraft, items: templateDraft.items.map((candidate, itemIndex) => itemIndex === index ? { ...candidate, failureSeverity: event.target.value } : candidate) })}><option value="low">{t('Low')}</option><option value="medium">{t('Medium')}</option><option value="high">{t('High')}</option><option value="critical">{t('Critical')}</option></select></label>
+                {templateDraft.installationQc ? <label>{t('Control point')}<select value={item.controlPoint} onChange={(event) => setTemplateDraft({ ...templateDraft, items: templateDraft.items.map((candidate, itemIndex) => itemIndex === index ? { ...candidate, controlPoint: event.target.value } : candidate) })}>{controlPoints.map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label> : null}
+                <label className="checkbox-label"><input type="checkbox" checked={item.allowNotApplicable} onChange={(event) => setTemplateDraft({ ...templateDraft, items: templateDraft.items.map((candidate, itemIndex) => itemIndex === index ? { ...candidate, allowNotApplicable: event.target.checked } : candidate) })} />{t('Allow N/A')}</label>
                 {templateDraft.installationQc ? (
                   <>
-                    <label className="checkbox-label"><input type="checkbox" checked={item.evidenceRequired} onChange={(event) => setTemplateDraft({ ...templateDraft, items: templateDraft.items.map((candidate, itemIndex) => itemIndex === index ? { ...candidate, evidenceRequired: event.target.checked } : candidate) })} />Evidence required to pass</label>
-                    <label className="checkbox-label"><input type="checkbox" checked={item.measurementRequired} onChange={(event) => setTemplateDraft({ ...templateDraft, items: templateDraft.items.map((candidate, itemIndex) => itemIndex === index ? { ...candidate, measurementRequired: event.target.checked } : candidate) })} />Measured value required</label>
-                    {item.measurementRequired ? <label>Measurement unit<input maxLength="40" value={item.measurementUnit} onChange={(event) => setTemplateDraft({ ...templateDraft, items: templateDraft.items.map((candidate, itemIndex) => itemIndex === index ? { ...candidate, measurementUnit: event.target.value } : candidate) })} placeholder="mm, bar, Nm" /></label> : null}
+                    <label className="checkbox-label"><input type="checkbox" checked={item.evidenceRequired} onChange={(event) => setTemplateDraft({ ...templateDraft, items: templateDraft.items.map((candidate, itemIndex) => itemIndex === index ? { ...candidate, evidenceRequired: event.target.checked } : candidate) })} />{t('Evidence required to pass')}</label>
+                    <label className="checkbox-label"><input type="checkbox" checked={item.measurementRequired} onChange={(event) => setTemplateDraft({ ...templateDraft, items: templateDraft.items.map((candidate, itemIndex) => itemIndex === index ? { ...candidate, measurementRequired: event.target.checked } : candidate) })} />{t('Measured value required')}</label>
+                    {item.measurementRequired ? <label>{t('Measurement unit')}<input maxLength="40" value={item.measurementUnit} onChange={(event) => setTemplateDraft({ ...templateDraft, items: templateDraft.items.map((candidate, itemIndex) => itemIndex === index ? { ...candidate, measurementUnit: event.target.value } : candidate) })} placeholder="mm, bar, Nm" /></label> : null}
                   </>
                 ) : null}
-                <button type="button" className="icon-button" aria-label={`Remove checklist item ${index + 1}`} disabled={templateDraft.items.length <= 2} onClick={() => setTemplateDraft({ ...templateDraft, items: templateDraft.items.filter((_, itemIndex) => itemIndex !== index).map((candidate, itemIndex) => ({ ...candidate, key: `item_${itemIndex + 1}` })) })}><X size={15} /></button>
+                <button type="button" className="icon-button" aria-label={t('Remove checklist item {number}', { number: index + 1 })} disabled={templateDraft.items.length <= 2} onClick={() => setTemplateDraft({ ...templateDraft, items: templateDraft.items.filter((_, itemIndex) => itemIndex !== index).map((candidate, itemIndex) => ({ ...candidate, key: `item_${itemIndex + 1}` })) })}><X size={15} /></button>
               </div>
             ))}
-            <button type="button" className="secondary-button" disabled={templateDraft.items.length >= 50} onClick={() => setTemplateDraft({ ...templateDraft, items: [...templateDraft.items, { key: `item_${templateDraft.items.length + 1}`, prompt: '', acceptanceCriteria: '', controlPoint: 'check', required: true, allowNotApplicable: false, evidenceRequired: false, measurementRequired: false, measurementUnit: '', failureSeverity: 'medium' }] })}><Plus size={15} />Add item</button>
+            <button type="button" className="secondary-button" disabled={templateDraft.items.length >= 50} onClick={() => setTemplateDraft({ ...templateDraft, items: [...templateDraft.items, { key: `item_${templateDraft.items.length + 1}`, prompt: '', acceptanceCriteria: '', controlPoint: 'check', required: true, allowNotApplicable: false, evidenceRequired: false, measurementRequired: false, measurementUnit: '', failureSeverity: 'medium' }] })}><Plus size={15} />{t('Add item')}</button>
           </fieldset>
-          <div className="form-actions"><button className="primary-button" disabled={submitting || templateDraft.items.some((item) => item.prompt.trim().length < 3 || (templateDraft.installationQc && item.acceptanceCriteria.trim().length < 3))}><ClipboardCheck size={15} />Retain template</button><button type="button" className="secondary-button" onClick={() => setTemplateDraft(null)}>Cancel</button></div>
+          <div className="form-actions"><button className="primary-button" disabled={submitting || templateDraft.items.some((item) => item.prompt.trim().length < 3 || (templateDraft.installationQc && item.acceptanceCriteria.trim().length < 3))}><ClipboardCheck size={15} />{t('Retain template')}</button><button type="button" className="secondary-button" onClick={() => setTemplateDraft(null)}>{t('Cancel')}</button></div>
         </form>
       ) : null}
 
       {scheduleDraft ? (
         <form className="inspection-schedule-form form-grid compact-form" data-testid="inspection-schedule-form" onSubmit={submitSchedule}>
-          <label>Template<select required value={scheduleDraft.templateId} onChange={(event) => {
+          <label>{t('Template')}<select required value={scheduleDraft.templateId} onChange={(event) => {
             const template = templates.find((candidate) => candidate.id === event.target.value)
             setScheduleDraft({
               ...createScheduleDraft(template),
               scheduledAt: scheduleDraft.scheduledAt,
               notes: scheduleDraft.notes,
             })
-          }}>{templates.filter((template) => template.status === 'active').map((template) => <option key={template.id} value={template.id}>{template.name} / v{template.versionNumber}{template.data?.installationQc ? ' / installation QC' : ''}</option>)}</select></label>
-          <label>Scheduled date and time<input required type="datetime-local" value={scheduleDraft.scheduledAt} onChange={(event) => setScheduleDraft({ ...scheduleDraft, scheduledAt: event.target.value })} /></label>
-          <label className="form-span">Inspection title<input required minLength="3" maxLength="240" value={scheduleDraft.title} onChange={(event) => setScheduleDraft({ ...scheduleDraft, title: event.target.value })} /></label>
+          }}>{templates.filter((template) => template.status === 'active').map((template) => <option key={template.id} value={template.id}>{template.name} / v{template.versionNumber}{template.data?.installationQc ? ` / ${t('installation QC')}` : ''}</option>)}</select></label>
+          <label>{t('Scheduled date and time')}<input required type="datetime-local" value={scheduleDraft.scheduledAt} onChange={(event) => setScheduleDraft({ ...scheduleDraft, scheduledAt: event.target.value })} /></label>
+          <label className="form-span">{t('Inspection title')}<input required minLength="3" maxLength="240" value={scheduleDraft.title} onChange={(event) => setScheduleDraft({ ...scheduleDraft, title: event.target.value })} /></label>
           {scheduleTemplate?.data?.installationQc ? (
             <>
-              <label>Installation task<select required value={scheduleDraft.taskId} onChange={(event) => {
+              <label>{t('Installation task')}<select required value={scheduleDraft.taskId} onChange={(event) => {
                 const task = eligibleTasks.find((candidate) => candidate.id === event.target.value)
                 const assignment = activeAssignments.find((candidate) => candidate.workerId === task?.assigneeId)
                   || activeAssignments.find((candidate) => candidate.id === scheduleDraft.assignmentId)
@@ -3699,8 +3715,8 @@ function InspectionChecklistControl({
                   assignedWorkerId: assignment?.workerId || '',
                   inspector: assignment?.workerName || '',
                 })
-              }}><option value="">Select active task</option>{eligibleTasks.map((task) => <option value={task.id} key={task.id}>{task.title}{task.assigneeId ? ' / assigned' : ''}</option>)}</select></label>
-              <label>Assigned inspector<select required value={scheduleDraft.assignmentId} onChange={(event) => {
+              }}><option value="">{t('Select active task')}</option>{eligibleTasks.map((task) => <option value={task.id} key={task.id}>{task.title}{task.assigneeId ? ` / ${t('assigned')}` : ''}</option>)}</select></label>
+              <label>{t('Assigned inspector')}<select required value={scheduleDraft.assignmentId} onChange={(event) => {
                 const assignment = activeAssignments.find((candidate) => candidate.id === event.target.value)
                 setScheduleDraft({
                   ...scheduleDraft,
@@ -3708,41 +3724,41 @@ function InspectionChecklistControl({
                   assignedWorkerId: assignment?.workerId || '',
                   inspector: assignment?.workerName || '',
                 })
-              }}><option value="">Select active assignment</option>{activeAssignments.map((assignment) => <option value={assignment.id} key={assignment.id}>{assignment.workerName || assignment.workerId} / {formatStatus(assignment.status)}</option>)}</select></label>
-              <label>Work location<input required minLength="2" maxLength="240" value={scheduleDraft.workLocation} onChange={(event) => setScheduleDraft({ ...scheduleDraft, workLocation: event.target.value })} placeholder="Building, level, room, grid, or asset" /></label>
-              <label>Installation stage<select value={scheduleDraft.installationStage} onChange={(event) => setScheduleDraft({ ...scheduleDraft, installationStage: event.target.value })}>{installationStages.map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label>
-              <label>Control point<select value={scheduleDraft.controlPoint} onChange={(event) => setScheduleDraft({ ...scheduleDraft, controlPoint: event.target.value })}>{controlPoints.map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label>
-              <label className="form-span">Reference basis<textarea required minLength="3" maxLength="600" value={scheduleDraft.referenceBasis} onChange={(event) => setScheduleDraft({ ...scheduleDraft, referenceBasis: event.target.value })} placeholder="Approved drawing, specification clause, method statement, manufacturer requirement, or accepted sample." /></label>
+              }}><option value="">{t('Select active assignment')}</option>{activeAssignments.map((assignment) => <option value={assignment.id} key={assignment.id}>{assignment.workerName || assignment.workerId} / {t(formatStatus(assignment.status))}</option>)}</select></label>
+              <label>{t('Work location')}<input required minLength="2" maxLength="240" value={scheduleDraft.workLocation} onChange={(event) => setScheduleDraft({ ...scheduleDraft, workLocation: event.target.value })} placeholder={t('Building, level, room, grid, or asset')} /></label>
+              <label>{t('Installation stage')}<select value={scheduleDraft.installationStage} onChange={(event) => setScheduleDraft({ ...scheduleDraft, installationStage: event.target.value })}>{installationStages.map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label>
+              <label>{t('Control point')}<select value={scheduleDraft.controlPoint} onChange={(event) => setScheduleDraft({ ...scheduleDraft, controlPoint: event.target.value })}>{controlPoints.map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label>
+              <label className="form-span">{t('Reference basis')}<textarea required minLength="3" maxLength="600" value={scheduleDraft.referenceBasis} onChange={(event) => setScheduleDraft({ ...scheduleDraft, referenceBasis: event.target.value })} placeholder={t('Approved drawing, specification clause, method statement, manufacturer requirement, or accepted sample.')} /></label>
               <fieldset className="installation-qc-reference-documents form-span">
-                <legend>Current retained references</legend>
+                <legend>{t('Current retained references')}</legend>
                 {(job.documents || EMPTY_LIST).length ? (job.documents || EMPTY_LIST).map((document) => (
                   <label className="checkbox-label" key={document.id}><input type="checkbox" checked={scheduleDraft.referenceDocumentIds.includes(document.id)} onChange={(event) => setScheduleDraft({
                     ...scheduleDraft,
                     referenceDocumentIds: event.target.checked
                       ? [...scheduleDraft.referenceDocumentIds, document.id]
                       : scheduleDraft.referenceDocumentIds.filter((id) => id !== document.id),
-                  })} />{document.title || document.filename || document.id}{document.revision ? ` / rev ${document.revision}` : ''}</label>
-                )) : <span>No retained job documents. The written reference basis remains mandatory.</span>}
+                  })} />{document.title || document.filename || document.id}{document.revision ? ` / ${t('rev')} ${document.revision}` : ''}</label>
+                )) : <span>{t('No retained job documents. The written reference basis remains mandatory.')}</span>}
               </fieldset>
             </>
-          ) : <label>Inspector<input value={scheduleDraft.inspector} onChange={(event) => setScheduleDraft({ ...scheduleDraft, inspector: event.target.value })} /></label>}
-          <div className="inspection-template-summary"><strong>{scheduleTemplate?.items?.length || 0} checks</strong><span>{formatStatus(scheduleTemplate?.discipline || 'general')} / immutable v{scheduleTemplate?.versionNumber || '-'}</span></div>
-          {scheduleTemplate?.data?.installationQc && (!eligibleTasks.length || !activeAssignments.length) ? <p className="workflow-note form-span">Create an active task and approved worker assignment before scheduling installation QC.</p> : null}
-          <div className="form-actions form-span"><button className="primary-button" disabled={submitting || !scheduleDraft.templateId || !toIsoDateTime(scheduleDraft.scheduledAt) || !installationScheduleReady}><CalendarDays size={15} />{scheduleTemplate?.data?.installationQc ? 'Schedule control point' : 'Schedule checklist'}</button><button type="button" className="secondary-button" onClick={() => setScheduleDraft(null)}>Cancel</button></div>
+          ) : <label>{t('Inspector')}<input value={scheduleDraft.inspector} onChange={(event) => setScheduleDraft({ ...scheduleDraft, inspector: event.target.value })} /></label>}
+          <div className="inspection-template-summary"><strong>{t('{count} checks', { count: scheduleTemplate?.items?.length || 0 })}</strong><span>{t(formatStatus(scheduleTemplate?.discipline || 'general'))} / {t('immutable')} v{scheduleTemplate?.versionNumber || '-'}</span></div>
+          {scheduleTemplate?.data?.installationQc && (!eligibleTasks.length || !activeAssignments.length) ? <p className="workflow-note form-span">{t('Create an active task and approved worker assignment before scheduling installation QC.')}</p> : null}
+          <div className="form-actions form-span"><button className="primary-button" disabled={submitting || !scheduleDraft.templateId || !toIsoDateTime(scheduleDraft.scheduledAt) || !installationScheduleReady}><CalendarDays size={15} />{scheduleTemplate?.data?.installationQc ? t('Schedule control point') : t('Schedule checklist')}</button><button type="button" className="secondary-button" onClick={() => setScheduleDraft(null)}>{t('Cancel')}</button></div>
         </form>
       ) : null}
 
       {activeInspection ? (
         <form className="inspection-checklist-form" data-testid="inspection-checklist-form" onSubmit={submitChecklist}>
-          <div className="inspection-checklist-run-heading"><div><strong>{activeInspection.title}</strong><small>{activeInspection.checklist.snapshot.templateName} / v{activeInspection.checklist.snapshot.templateVersion}</small></div><span className={`status status-${activeInspection.status}`}>{formatStatus(activeInspection.status)}</span></div>
+          <div className="inspection-checklist-run-heading"><div><strong>{activeInspection.title}</strong><small>{activeInspection.checklist.snapshot.templateName} / v{activeInspection.checklist.snapshot.templateVersion}</small></div><span className={`status status-${activeInspection.status}`}>{t(formatStatus(activeInspection.status))}</span></div>
           {activeInstallationQc ? (
             <div className="installation-qc-context" data-testid="installation-qc-context">
-              <div><span>Location</span><strong>{activeInstallationQc.workLocation}</strong></div>
-              <div><span>Stage</span><strong>{formatStatus(activeInstallationQc.installationStage)}</strong></div>
-              <div><span>Control</span><strong>{formatStatus(activeInstallationQc.controlPoint)}</strong></div>
-              <div><span>Assigned worker</span><strong>{activeInstallationQc.assignedWorkerName || activeInstallationQc.assignedWorkerId}</strong></div>
-              <p><strong>Reference basis:</strong> {activeInstallationQc.referenceBasis}</p>
-              {!activeInstallationQc.sourceCurrent ? <p className="installation-qc-blocked"><TriangleAlert size={15} />Source changed. Office review and a newly scheduled control are required before submission.</p> : null}
+              <div><span>{t('Location')}</span><strong>{activeInstallationQc.workLocation}</strong></div>
+              <div><span>{t('Stage')}</span><strong>{t(formatStatus(activeInstallationQc.installationStage))}</strong></div>
+              <div><span>{t('Control')}</span><strong>{t(formatStatus(activeInstallationQc.controlPoint))}</strong></div>
+              <div><span>{t('Assigned worker')}</span><strong>{activeInstallationQc.assignedWorkerName || activeInstallationQc.assignedWorkerId}</strong></div>
+              <p><strong>{t('Reference basis')}:</strong> {activeInstallationQc.referenceBasis}</p>
+              {!activeInstallationQc.sourceCurrent ? <p className="installation-qc-blocked"><TriangleAlert size={15} />{t('Source changed. Office review and a newly scheduled control are required before submission.')}</p> : null}
             </div>
           ) : null}
           <div className="inspection-checklist-items">
@@ -3751,29 +3767,34 @@ function InspectionChecklistControl({
               return (
                 <fieldset className={`inspection-checklist-item inspection-result-${response.result || 'pending'}`} key={item.key}>
                   <legend>{index + 1}. {item.prompt}</legend>
-                  {activeInstallationQc ? <p className="inspection-acceptance-criteria"><strong>Accept when:</strong> {item.acceptanceCriteria || item.prompt}</p> : null}
-                  <div className="inspection-result-options" role="radiogroup" aria-label={`Result for ${item.prompt}`}>
-                    {[['pass', 'Pass', Check], ['fail', 'Fail', TriangleAlert], ...(item.allowNotApplicable ? [['not_applicable', 'N/A', Ban]] : [])].map(([value, label, Icon]) => (
+                  {activeInstallationQc ? <p className="inspection-acceptance-criteria"><strong>{t('Accept when')}:</strong> {item.acceptanceCriteria || item.prompt}</p> : null}
+                  <div className="inspection-result-options" role="radiogroup" aria-label={t('Result for {prompt}', { prompt: item.prompt })}>
+                    {[['pass', t('Pass'), Check], ['fail', t('Fail'), TriangleAlert], ...(item.allowNotApplicable ? [['not_applicable', t('N/A'), Ban]] : [])].map(([value, label, Icon]) => (
                       <label key={value} className={response.result === value ? 'selected' : ''}><input required={item.required} type="radio" name={`inspection-${item.key}`} value={value} checked={response.result === value} onChange={() => updateResponse(item.key, { result: value })} />{createElement(Icon, { size: 15 })}{label}</label>
                     ))}
                   </div>
-                  <label>Item notes<textarea required={response.result === 'fail' && !response.evidenceDocumentId} value={response.notes} onChange={(event) => updateResponse(item.key, { notes: event.target.value })} placeholder={response.result === 'fail' ? 'Describe the defect, immediate control, or required correction.' : 'Optional retained context.'} /></label>
-                  <label>Evidence link<select required={response.result === 'pass' && item.evidenceRequired} value={response.evidenceDocumentId} onChange={(event) => updateResponse(item.key, { evidenceDocumentId: event.target.value })}><option value="">No linked document</option>{(job.documents || EMPTY_LIST).map((document) => <option value={document.id} key={document.id}>{document.title || document.filename || document.id}</option>)}</select></label>
-                  {item.measurementRequired ? <label>Observed value{item.measurementUnit ? ` (${item.measurementUnit})` : ''}<input required={response.result === 'pass'} maxLength="500" value={response.observedValue} onChange={(event) => updateResponse(item.key, { observedValue: event.target.value })} placeholder="Retained measured result" /></label> : null}
+                  <label>{t('Item notes')}<textarea required={response.result === 'fail' && !response.evidenceDocumentId} value={response.notes} onChange={(event) => updateResponse(item.key, { notes: event.target.value })} placeholder={response.result === 'fail' ? t('Describe the defect, immediate control, or required correction.') : t('Optional retained context.')} /></label>
+                  <label>{t('Evidence link')}<select required={response.result === 'pass' && item.evidenceRequired} value={response.evidenceDocumentId} onChange={(event) => updateResponse(item.key, { evidenceDocumentId: event.target.value })}><option value="">{t('No linked document')}</option>{(job.documents || EMPTY_LIST).map((document) => <option value={document.id} key={document.id}>{document.title || document.filename || document.id}</option>)}</select></label>
+                  {item.measurementRequired ? <label>{t('Observed value')}{item.measurementUnit ? ` (${item.measurementUnit})` : ''}<input required={response.result === 'pass'} maxLength="500" value={response.observedValue} onChange={(event) => updateResponse(item.key, { observedValue: event.target.value })} placeholder={t('Retained measured result')} /></label> : null}
                   {item.controlPoint === 'witness' ? (
                     <>
-                      <label>Witness name<input required={response.result === 'pass'} minLength="2" maxLength="160" value={response.witnessName} onChange={(event) => updateResponse(item.key, { witnessName: event.target.value })} /></label>
-                      <label>Witness role<input required={response.result === 'pass'} minLength="2" maxLength="160" value={response.witnessRole} onChange={(event) => updateResponse(item.key, { witnessRole: event.target.value })} /></label>
+                      <label>{t('Witness name')}<input required={response.result === 'pass'} minLength="2" maxLength="160" value={response.witnessName} onChange={(event) => updateResponse(item.key, { witnessName: event.target.value })} /></label>
+                      <label>{t('Witness role')}<input required={response.result === 'pass'} minLength="2" maxLength="160" value={response.witnessRole} onChange={(event) => updateResponse(item.key, { witnessRole: event.target.value })} /></label>
                     </>
                   ) : null}
-                  <small>{formatStatus(item.controlPoint || 'check')} point / {formatStatus(item.failureSeverity)} failure severity{item.evidenceRequired ? ' / pass evidence required' : ''}{item.allowNotApplicable ? ' / N/A allowed' : ''}</small>
+                  <small>{t('{point} point / {severity} failure severity{evidence}{na}', {
+                    point: t(formatStatus(item.controlPoint || 'check')),
+                    severity: t(formatStatus(item.failureSeverity)),
+                    evidence: item.evidenceRequired ? ` / ${t('pass evidence required')}` : '',
+                    na: item.allowNotApplicable ? ` / ${t('N/A allowed')}` : '',
+                  })}</small>
                 </fieldset>
               )
             })}
           </div>
-          <label className="inspection-run-notes">Inspection summary<textarea maxLength="4000" value={submissionNotes} onChange={(event) => setSubmissionNotes(event.target.value)} placeholder="Record overall context, limitations, and follow-up." /></label>
-          <p className="workflow-note">Submission freezes these responses, creates corrective observations for failed items, and requests an independent approval. Offline capture may queue evidence, but never releases a hold point or completes the task.</p>
-          <div className="form-actions"><button className="primary-button" disabled={submitting || !checklistReady || activeInstallationQc?.sourceCurrent === false}><ShieldCheck size={15} />{navigator.onLine === false ? 'Save checklist offline' : 'Submit for review'}</button><button type="button" className="secondary-button" onClick={() => setActiveInspection(null)}>Cancel</button></div>
+          <label className="inspection-run-notes">{t('Inspection summary')}<textarea maxLength="4000" value={submissionNotes} onChange={(event) => setSubmissionNotes(event.target.value)} placeholder={t('Record overall context, limitations, and follow-up.')} /></label>
+          <p className="workflow-note">{t('Submission freezes these responses, creates corrective observations for failed items, and requests an independent approval. Offline capture may queue evidence, but never releases a hold point or completes the task.')}</p>
+          <div className="form-actions"><button className="primary-button" disabled={submitting || !checklistReady || activeInstallationQc?.sourceCurrent === false}><ShieldCheck size={15} />{navigator.onLine === false ? t('Save checklist offline') : t('Submit for review')}</button><button type="button" className="secondary-button" onClick={() => setActiveInspection(null)}>{t('Cancel')}</button></div>
         </form>
       ) : null}
 
@@ -3794,16 +3815,18 @@ function InspectionChecklistControl({
               <div>
                 <strong>{inspection.title}</strong>
                 <small>{inspection.checklist.snapshot.templateName} / v{inspection.checklist.snapshot.templateVersion} / {formatDateTime(inspection.scheduledAt)}</small>
-                {installationQc ? <span>{installationQc.workLocation} / {formatStatus(installationQc.installationStage)} / {formatStatus(installationQc.controlPoint)} / {installationQc.assignedWorkerName || installationQc.assignedWorkerId}</span> : null}
-                <span>{summary ? `${summary.responseCount} responses / ${summary.failedCount} failed` : `${inspection.checklist.snapshot.items.length} checks waiting`}</span>
-                {installationQc && installationQc.sourceCurrent === false ? <span className="installation-qc-stale">Retained source is stale; release and task completion are blocked.</span> : null}
+                {installationQc ? <span>{installationQc.workLocation} / {t(formatStatus(installationQc.installationStage))} / {t(formatStatus(installationQc.controlPoint))} / {installationQc.assignedWorkerName || installationQc.assignedWorkerId}</span> : null}
+                <span>{summary
+                  ? t('{responses} responses / {failed} failed', { responses: summary.responseCount, failed: summary.failedCount })
+                  : t('{count} checks waiting', { count: inspection.checklist.snapshot.items.length })}</span>
+                {installationQc && installationQc.sourceCurrent === false ? <span className="installation-qc-stale">{t('Retained source is stale; release and task completion are blocked.')}</span> : null}
               </div>
-              <div className="inspection-checklist-row-actions"><span className={`status status-${installationQc?.effectiveStatus || inspection.status}`}>{formatStatus(installationQc?.effectiveStatus || inspection.status)}</span>{pending && canApprove ? <button type="button" className="secondary-button" onClick={() => onOpenApprovals({ approvalId: pending.id })}><ShieldCheck size={14} />Review</button> : null}{canFill ? <button type="button" className="secondary-button" disabled={submitting} onClick={() => beginChecklist(inspection)}><ClipboardList size={14} />{inspection.checklist.submissions.length ? 'Correct and resubmit' : 'Complete'}</button> : null}</div>
+              <div className="inspection-checklist-row-actions"><span className={`status status-${installationQc?.effectiveStatus || inspection.status}`}>{t(formatStatus(installationQc?.effectiveStatus || inspection.status))}</span>{pending && canApprove ? <button type="button" className="secondary-button" onClick={() => onOpenApprovals({ approvalId: pending.id })}><ShieldCheck size={14} />{t('Review')}</button> : null}{canFill ? <button type="button" className="secondary-button" disabled={submitting} onClick={() => beginChecklist(inspection)}><ClipboardList size={14} />{inspection.checklist.submissions.length ? t('Correct and resubmit') : t('Complete')}</button> : null}</div>
             </article>
           )
-        }) : <p className="workflow-note">No versioned inspection checklist has been scheduled for this job.</p>}
+        }) : <p className="workflow-note">{t('No versioned inspection checklist has been scheduled for this job.')}</p>}
       </div>
-      {fieldScoped ? <p className="workflow-note">Assigned field workers can complete scheduled checklists. Template and schedule control remain with the office.</p> : null}
+      {fieldScoped ? <p className="workflow-note">{t('Assigned field workers can complete scheduled checklists. Template and schedule control remain with the office.')}</p> : null}
     </section>
   )
 }
@@ -4162,6 +4185,7 @@ function FieldRiskControl({
 
 function CloseoutRegister({
   job,
+  locale,
   canReportPunch,
   canCoordinate,
   canApprove,
@@ -4172,6 +4196,7 @@ function CloseoutRegister({
   onLifecycle,
   onOpenApprovals,
 }) {
+  const t = (key, variables = {}) => operatorText(locale, key, variables)
   const [view, setView] = useState('punch_item')
   const [creating, setCreating] = useState(false)
   const [draft, setDraft] = useState(() => emptyCloseoutDraft('punch_item'))
@@ -4181,12 +4206,12 @@ function CloseoutRegister({
   const aftercare = job.aftercare || EMPTY_LIST
   const clientFeedback = job.clientFeedback || EMPTY_LIST
   const visibleViews = fieldScoped
-    ? [{ key: 'punch_item', label: 'Punch', count: punchItems.length }]
+    ? [{ key: 'punch_item', label: t('Punch'), count: punchItems.length }]
     : [
-        { key: 'punch_item', label: 'Punch', count: punchItems.length },
-        { key: 'warranty_claim', label: 'Warranty', count: warrantyClaims.length },
-        { key: 'aftercare', label: 'Aftercare', count: aftercare.length },
-        { key: 'client_feedback', label: 'Feedback', count: clientFeedback.length },
+        { key: 'punch_item', label: t('Punch'), count: punchItems.length },
+        { key: 'warranty_claim', label: t('Warranty'), count: warrantyClaims.length },
+        { key: 'aftercare', label: t('Aftercare'), count: aftercare.length },
+        { key: 'client_feedback', label: t('Feedback'), count: clientFeedback.length },
       ]
   const records = view === 'warranty_claim'
     ? warrantyClaims
@@ -4283,21 +4308,21 @@ function CloseoutRegister({
       <div className="section-heading closeout-register-heading">
         <PackageCheck size={18} />
         <div>
-          <h3>Closeout and aftercare</h3>
-          <p>Retain defects, warranty issues, and follow-up work without asserting acceptance or contacting the client.</p>
+          <h3>{t('Closeout and aftercare')}</h3>
+          <p>{t('Retain defects, warranty issues, and follow-up work without asserting acceptance or contacting the client.')}</p>
         </div>
-        {canCreate ? <button type="button" className="secondary-button" disabled={submitting} onClick={beginCreate}><Plus size={15} />{view === 'punch_item' ? 'New punch item' : view === 'warranty_claim' ? 'New warranty claim' : view === 'aftercare' ? 'New follow-up' : 'Record feedback'}</button> : null}
+        {canCreate ? <button type="button" className="secondary-button" disabled={submitting} onClick={beginCreate}><Plus size={15} />{view === 'punch_item' ? t('New punch item') : view === 'warranty_claim' ? t('New warranty claim') : view === 'aftercare' ? t('New follow-up') : t('Record feedback')}</button> : null}
       </div>
 
-      <div className="closeout-summary" aria-label="Closeout summary">
-        <div><span>Open punch</span><strong>{openPunch}</strong></div>
-        <div><span>Warranty</span><strong>{openWarranty}</strong></div>
-        <div><span>Aftercare</span><strong>{openAftercare}</strong></div>
-        <div><span>Feedback recovery</span><strong>{recoveryRequired}</strong></div>
-        <div><span>Pending review</span><strong>{pendingReview}</strong></div>
+      <div className="closeout-summary" aria-label={t('Closeout summary')}>
+        <div><span>{t('Open punch')}</span><strong>{openPunch}</strong></div>
+        <div><span>{t('Warranty')}</span><strong>{openWarranty}</strong></div>
+        <div><span>{t('Aftercare')}</span><strong>{openAftercare}</strong></div>
+        <div><span>{t('Feedback recovery')}</span><strong>{recoveryRequired}</strong></div>
+        <div><span>{t('Pending review')}</span><strong>{pendingReview}</strong></div>
       </div>
 
-      <div className={`closeout-tabs ${visibleViews.length === 1 ? 'single-tab' : ''}`} role="tablist" aria-label="Closeout record type">
+      <div className={`closeout-tabs ${visibleViews.length === 1 ? 'single-tab' : ''}`} role="tablist" aria-label={t('Closeout record type')}>
         {visibleViews.map((option) => (
           <button type="button" role="tab" aria-selected={view === option.key} className={view === option.key ? 'active' : ''} key={option.key} onClick={() => selectView(option.key)}>{option.label} <span>{option.count}</span></button>
         ))}
@@ -4307,49 +4332,49 @@ function CloseoutRegister({
         <form className="closeout-form form-grid compact-form" data-testid={`closeout-${view}-form`} onSubmit={submitRecord}>
           {view === 'punch_item' ? (
             <>
-              <label>Severity<select value={draft.severity} onChange={(event) => setDraft({ ...draft, severity: event.target.value })}><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="critical">Critical</option></select></label>
-              <label>Corrective due date<input required type="date" value={draft.dueAt} onChange={(event) => setDraft({ ...draft, dueAt: event.target.value })} /></label>
-              <label className="form-span">Punch title<input autoFocus required minLength="3" maxLength="240" value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} placeholder="Incomplete, defective, or unverified work" /></label>
-              <label>Assigned to<input required minLength="2" maxLength="160" value={draft.assignee} onChange={(event) => setDraft({ ...draft, assignee: event.target.value })} /></label>
-              <label>Location<input maxLength="240" value={draft.location} onChange={(event) => setDraft({ ...draft, location: event.target.value })} placeholder="Room, elevation, grid, or asset" /></label>
-              <label className="form-span">Observed condition<textarea required minLength="4" maxLength="4000" value={draft.description} onChange={(event) => setDraft({ ...draft, description: event.target.value })} placeholder="Record the condition and completion criteria without assuming correction." /></label>
-              <label className="form-span">Linked evidence<select value={draft.evidenceDocumentId} onChange={(event) => setDraft({ ...draft, evidenceDocumentId: event.target.value })}><option value="">No linked document</option>{(job.documents || EMPTY_LIST).map((document) => <option value={document.id} key={document.id}>{document.title || document.filename || document.id}</option>)}</select></label>
-              {canCoordinate ? <label className="checkbox-label form-span"><input type="checkbox" checked={draft.clientVisible} onChange={(event) => setDraft({ ...draft, clientVisible: event.target.checked })} />Prepare for client-visible review; approval remains required</label> : null}
+              <label>{t('Severity')}<select value={draft.severity} onChange={(event) => setDraft({ ...draft, severity: event.target.value })}><option value="low">{t('Low')}</option><option value="medium">{t('Medium')}</option><option value="high">{t('High')}</option><option value="critical">{t('Critical')}</option></select></label>
+              <label>{t('Corrective due date')}<input required type="date" value={draft.dueAt} onChange={(event) => setDraft({ ...draft, dueAt: event.target.value })} /></label>
+              <label className="form-span">{t('Punch title')}<input autoFocus required minLength="3" maxLength="240" value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} placeholder={t('Incomplete, defective, or unverified work')} /></label>
+              <label>{t('Assigned to')}<input required minLength="2" maxLength="160" value={draft.assignee} onChange={(event) => setDraft({ ...draft, assignee: event.target.value })} /></label>
+              <label>{t('Location')}<input maxLength="240" value={draft.location} onChange={(event) => setDraft({ ...draft, location: event.target.value })} placeholder={t('Room, elevation, grid, or asset')} /></label>
+              <label className="form-span">{t('Observed condition')}<textarea required minLength="4" maxLength="4000" value={draft.description} onChange={(event) => setDraft({ ...draft, description: event.target.value })} placeholder={t('Record the condition and completion criteria without assuming correction.')} /></label>
+              <label className="form-span">{t('Linked evidence')}<select value={draft.evidenceDocumentId} onChange={(event) => setDraft({ ...draft, evidenceDocumentId: event.target.value })}><option value="">{t('No linked document')}</option>{(job.documents || EMPTY_LIST).map((document) => <option value={document.id} key={document.id}>{document.title || document.filename || document.id}</option>)}</select></label>
+              {canCoordinate ? <label className="checkbox-label form-span"><input type="checkbox" checked={draft.clientVisible} onChange={(event) => setDraft({ ...draft, clientVisible: event.target.checked })} />{t('Prepare for client-visible review; approval remains required')}</label> : null}
             </>
           ) : view === 'warranty_claim' ? (
             <>
-              <label>Warranty type<select value={draft.warrantyType} onChange={(event) => setDraft({ ...draft, warrantyType: event.target.value })}><option value="workmanship">Workmanship</option><option value="material">Material</option><option value="manufacturer">Manufacturer</option><option value="service">Service</option><option value="other">Other</option></select></label>
-              <label>Severity<select value={draft.severity} onChange={(event) => setDraft({ ...draft, severity: event.target.value })}><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="critical">Critical</option></select></label>
-              <label className="form-span">Claim title<input autoFocus required minLength="3" maxLength="240" value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} placeholder="Reported post-completion issue" /></label>
-              <label>Review due date<input required type="date" value={draft.dueAt} onChange={(event) => setDraft({ ...draft, dueAt: event.target.value })} /></label>
-              <label className="form-span">Reported issue<textarea required minLength="4" maxLength="4000" value={draft.issue} onChange={(event) => setDraft({ ...draft, issue: event.target.value })} placeholder="Retain the reported facts without admitting liability or promising a remedy." /></label>
+              <label>{t('Warranty type')}<select value={draft.warrantyType} onChange={(event) => setDraft({ ...draft, warrantyType: event.target.value })}><option value="workmanship">{t('Workmanship')}</option><option value="material">{t('Material')}</option><option value="manufacturer">{t('Manufacturer')}</option><option value="service">{t('Service')}</option><option value="other">{t('Other')}</option></select></label>
+              <label>{t('Severity')}<select value={draft.severity} onChange={(event) => setDraft({ ...draft, severity: event.target.value })}><option value="low">{t('Low')}</option><option value="medium">{t('Medium')}</option><option value="high">{t('High')}</option><option value="critical">{t('Critical')}</option></select></label>
+              <label className="form-span">{t('Claim title')}<input autoFocus required minLength="3" maxLength="240" value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} placeholder={t('Reported post-completion issue')} /></label>
+              <label>{t('Review due date')}<input required type="date" value={draft.dueAt} onChange={(event) => setDraft({ ...draft, dueAt: event.target.value })} /></label>
+              <label className="form-span">{t('Reported issue')}<textarea required minLength="4" maxLength="4000" value={draft.issue} onChange={(event) => setDraft({ ...draft, issue: event.target.value })} placeholder={t('Retain the reported facts without admitting liability or promising a remedy.')} /></label>
             </>
           ) : view === 'aftercare' ? (
             <>
-              <label>Follow-up type<select value={draft.type} onChange={(event) => setDraft({ ...draft, type: event.target.value })}><option value="client_follow_up">Client follow-up</option><option value="warranty_review">Warranty review</option><option value="maintenance_review">Maintenance review</option><option value="quality_check">Quality check</option></select></label>
-              <label>Channel<select value={draft.channel} onChange={(event) => setDraft({ ...draft, channel: event.target.value })}><option value="portal">Portal</option><option value="phone">Phone</option><option value="email">Email</option><option value="site_visit">Site visit</option></select></label>
-              <label className="form-span">Follow-up title<input autoFocus required minLength="3" maxLength="240" value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} placeholder="Internal follow-up action" /></label>
-              <label>Owner<input required minLength="2" maxLength="160" value={draft.owner} onChange={(event) => setDraft({ ...draft, owner: event.target.value })} /></label>
-              <label>Due date<input required type="date" value={draft.dueAt} onChange={(event) => setDraft({ ...draft, dueAt: event.target.value })} /></label>
-              <label className="form-span">Follow-up purpose<textarea required minLength="4" maxLength="4000" value={draft.notes} onChange={(event) => setDraft({ ...draft, notes: event.target.value })} placeholder="What should be checked and what evidence should be retained?" /></label>
+              <label>{t('Follow-up type')}<select value={draft.type} onChange={(event) => setDraft({ ...draft, type: event.target.value })}><option value="client_follow_up">{t('Client follow-up')}</option><option value="warranty_review">{t('Warranty review')}</option><option value="maintenance_review">{t('Maintenance review')}</option><option value="quality_check">{t('Quality check')}</option></select></label>
+              <label>{t('Channel')}<select value={draft.channel} onChange={(event) => setDraft({ ...draft, channel: event.target.value })}><option value="portal">{t('Portal')}</option><option value="phone">{t('Phone')}</option><option value="email">{t('Email')}</option><option value="site_visit">{t('Site visit')}</option></select></label>
+              <label className="form-span">{t('Follow-up title')}<input autoFocus required minLength="3" maxLength="240" value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} placeholder={t('Internal follow-up action')} /></label>
+              <label>{t('Owner')}<input required minLength="2" maxLength="160" value={draft.owner} onChange={(event) => setDraft({ ...draft, owner: event.target.value })} /></label>
+              <label>{t('Due date')}<input required type="date" value={draft.dueAt} onChange={(event) => setDraft({ ...draft, dueAt: event.target.value })} /></label>
+              <label className="form-span">{t('Follow-up purpose')}<textarea required minLength="4" maxLength="4000" value={draft.notes} onChange={(event) => setDraft({ ...draft, notes: event.target.value })} placeholder={t('What should be checked and what evidence should be retained?')} /></label>
             </>
           ) : (
             <>
-              <label>Survey point<select value={draft.surveyType} onChange={(event) => setDraft({ ...draft, surveyType: event.target.value })}><option value="project_experience">Project experience</option><option value="handover">Handover</option><option value="aftercare">Aftercare</option><option value="warranty">Warranty</option></select></label>
-              <label>Respondent<input maxLength="160" value={draft.respondentName} onChange={(event) => setDraft({ ...draft, respondentName: event.target.value })} placeholder="Optional name" /></label>
-              <label>NPS (0-10)<input required type="number" min="0" max="10" step="1" value={draft.npsScore} onChange={(event) => setDraft({ ...draft, npsScore: event.target.value === '' ? '' : Number(event.target.value) })} /></label>
-              <label>Satisfaction (1-5)<input required type="number" min="1" max="5" step="1" value={draft.csatScore} onChange={(event) => setDraft({ ...draft, csatScore: event.target.value === '' ? '' : Number(event.target.value) })} /></label>
-              <label>Ease (1-5)<input required type="number" min="1" max="5" step="1" value={draft.effortScore} onChange={(event) => setDraft({ ...draft, effortScore: event.target.value === '' ? '' : Number(event.target.value) })} /></label>
-              <label className="form-span">Evidence reference<input autoFocus required minLength="4" maxLength="500" value={draft.evidenceReference} onChange={(event) => setDraft({ ...draft, evidenceReference: event.target.value })} placeholder="Call note, signed survey, message, or import reference" /></label>
-              <label className="form-span">Client comment<textarea maxLength="4000" value={draft.comment} onChange={(event) => setDraft({ ...draft, comment: event.target.value })} placeholder="Retain the client's words without adding inferred sentiment." /></label>
-              <label className="checkbox-label form-span"><input type="checkbox" checked={draft.followUpConsent} onChange={(event) => setDraft({ ...draft, followUpConsent: event.target.checked })} />Client consented to feedback follow-up</label>
-              <label className="checkbox-label form-span"><input type="checkbox" checked={draft.testimonialConsent} onChange={(event) => setDraft({ ...draft, testimonialConsent: event.target.checked })} />Client consented to internal testimonial review; publication still requires separate coordination</label>
+              <label>{t('Survey point')}<select value={draft.surveyType} onChange={(event) => setDraft({ ...draft, surveyType: event.target.value })}><option value="project_experience">{t('Project experience')}</option><option value="handover">{t('Handover')}</option><option value="aftercare">{t('Aftercare')}</option><option value="warranty">{t('Warranty')}</option></select></label>
+              <label>{t('Respondent')}<input maxLength="160" value={draft.respondentName} onChange={(event) => setDraft({ ...draft, respondentName: event.target.value })} placeholder={t('Optional name')} /></label>
+              <label>{t('NPS (0-10)')}<input required type="number" min="0" max="10" step="1" value={draft.npsScore} onChange={(event) => setDraft({ ...draft, npsScore: event.target.value === '' ? '' : Number(event.target.value) })} /></label>
+              <label>{t('Satisfaction (1-5)')}<input required type="number" min="1" max="5" step="1" value={draft.csatScore} onChange={(event) => setDraft({ ...draft, csatScore: event.target.value === '' ? '' : Number(event.target.value) })} /></label>
+              <label>{t('Ease (1-5)')}<input required type="number" min="1" max="5" step="1" value={draft.effortScore} onChange={(event) => setDraft({ ...draft, effortScore: event.target.value === '' ? '' : Number(event.target.value) })} /></label>
+              <label className="form-span">{t('Evidence reference')}<input autoFocus required minLength="4" maxLength="500" value={draft.evidenceReference} onChange={(event) => setDraft({ ...draft, evidenceReference: event.target.value })} placeholder={t('Call note, signed survey, message, or import reference')} /></label>
+              <label className="form-span">{t('Client comment')}<textarea maxLength="4000" value={draft.comment} onChange={(event) => setDraft({ ...draft, comment: event.target.value })} placeholder={t("Retain the client's words without adding inferred sentiment.")} /></label>
+              <label className="checkbox-label form-span"><input type="checkbox" checked={draft.followUpConsent} onChange={(event) => setDraft({ ...draft, followUpConsent: event.target.checked })} />{t('Client consented to feedback follow-up')}</label>
+              <label className="checkbox-label form-span"><input type="checkbox" checked={draft.testimonialConsent} onChange={(event) => setDraft({ ...draft, testimonialConsent: event.target.checked })} />{t('Client consented to internal testimonial review; publication still requires separate coordination')}</label>
             </>
           )}
-          <p className="workflow-note form-span">This retains an internal record only. It does not certify completion, accept liability, authorize cost, book work, or contact the client.</p>
+          <p className="workflow-note form-span">{t('This retains an internal record only. It does not certify completion, accept liability, authorize cost, book work, or contact the client.')}</p>
           <div className="form-actions form-span">
-            <button className="primary-button" disabled={submitting || invalidDraft || (view !== 'punch_item' && !online)}><ClipboardCheck size={15} />{view === 'punch_item' && !online ? 'Save punch item offline' : view !== 'punch_item' && !online ? 'Reconnect to retain' : view === 'punch_item' ? 'Retain punch item' : view === 'warranty_claim' ? 'Retain warranty claim' : view === 'aftercare' ? 'Retain follow-up' : 'Retain feedback'}</button>
-            <button type="button" className="secondary-button" onClick={() => setCreating(false)}>Cancel</button>
+            <button className="primary-button" disabled={submitting || invalidDraft || (view !== 'punch_item' && !online)}><ClipboardCheck size={15} />{view === 'punch_item' && !online ? t('Save punch item offline') : view !== 'punch_item' && !online ? t('Reconnect to retain') : view === 'punch_item' ? t('Retain punch item') : view === 'warranty_claim' ? t('Retain warranty claim') : view === 'aftercare' ? t('Retain follow-up') : t('Retain feedback')}</button>
+            <button type="button" className="secondary-button" onClick={() => setCreating(false)}>{t('Cancel')}</button>
           </div>
         </form>
       ) : null}
@@ -4361,12 +4386,12 @@ function CloseoutRegister({
           const feedbackRecoveryLabel = !record.followUpRequired
             ? null
             : !feedbackRecovery
-              ? 'Internal recovery required'
+              ? t('Internal recovery required')
               : ['completed', 'closed'].includes(feedbackRecovery.status)
-                ? 'Recovery completed'
+                ? t('Recovery completed')
                 : feedbackRecovery.status === 'cancelled'
-                  ? 'Recovery closed'
-                  : 'Recovery in progress'
+                  ? t('Recovery closed')
+                  : t('Recovery in progress')
           const feedbackRecoveryClass = !feedbackRecovery
             ? 'tag-amber'
             : ['completed', 'closed'].includes(feedbackRecovery.status)
@@ -4382,28 +4407,36 @@ function CloseoutRegister({
                 ? record.notes
                 : record.comment
           const meta = view === 'punch_item'
-            ? `${formatStatus(record.severity)} / ${record.assignee || 'Unassigned'} / due ${formatDate(record.dueAt)}`
+            ? t('{severity} / {assignee} / due {date}', { severity: t(formatStatus(record.severity)), assignee: record.assignee || t('Unassigned'), date: formatDate(record.dueAt) })
             : view === 'warranty_claim'
-              ? `${formatStatus(record.data?.warrantyType || 'workmanship')} / ${formatStatus(record.severity)} / due ${formatDate(record.dueAt)}`
+              ? t('{type} / {severity} / due {date}', { type: t(formatStatus(record.data?.warrantyType || 'workmanship')), severity: t(formatStatus(record.severity)), date: formatDate(record.dueAt) })
               : view === 'aftercare'
-                ? `${formatStatus(record.type)} / ${record.owner || 'Unassigned'} / due ${formatDate(record.dueAt)}`
-                : `NPS ${record.npsScore}/10 / satisfaction ${record.csatScore}/5 / ease ${record.effortScore}/5 / ${formatDate(record.submittedAt)}`
+                ? t('{type} / {owner} / due {date}', { type: t(formatStatus(record.type)), owner: record.owner || t('Unassigned'), date: formatDate(record.dueAt) })
+                : t('NPS {nps}/10 / satisfaction {csat}/5 / ease {effort}/5 / {date}', { nps: record.npsScore, csat: record.csatScore, effort: record.effortScore, date: formatDate(record.submittedAt) })
           const title = view === 'client_feedback'
-            ? `${formatStatus(record.surveyType)} feedback${record.respondentName ? ` from ${record.respondentName}` : ''}`
+            ? record.respondentName
+              ? t('{type} feedback from {respondent}', { type: t(formatStatus(record.surveyType)), respondent: record.respondentName })
+              : t('{type} feedback', { type: t(formatStatus(record.surveyType)) })
             : record.title
           return (
             <article className={`closeout-row ${!['aftercare', 'client_feedback'].includes(view) ? `closeout-${record.severity}` : ''}`} key={record.id} data-testid={`closeout-${record.id}`}>
-              <div className="closeout-row-copy"><div><strong>{title}</strong><span className={`status status-${record.status}`}>{formatStatus(record.status)}</span></div><small>{meta}</small>{detail ? <p>{detail}</p> : null}{view === 'client_feedback' && feedbackRecoveryLabel ? <span className={`tag ${feedbackRecoveryClass}`}>{feedbackRecoveryLabel}</span> : null}</div>
+              <div className="closeout-row-copy"><div><strong>{title}</strong><span className={`status status-${record.status}`}>{t(formatStatus(record.status))}</span></div><small>{meta}</small>{detail ? <p>{detail}</p> : null}{view === 'client_feedback' && feedbackRecoveryLabel ? <span className={`tag ${feedbackRecoveryClass}`}>{feedbackRecoveryLabel}</span> : null}</div>
               <div className="closeout-row-actions">
-                {pending ? <span className="tag tag-amber">Approval pending</span> : null}
-                {pending && canApprove ? <button type="button" className="secondary-button" onClick={() => onOpenApprovals({ approvalId: pending.id })}><ShieldCheck size={14} />Review</button> : null}
-                {!pending && canCoordinate && activeStatuses.has(record.status) ? <button type="button" className="secondary-button" disabled={submitting} onClick={() => onLifecycle(view, record)}><ClipboardCheck size={14} />{view === 'punch_item' ? 'Resolve punch' : view === 'warranty_claim' ? 'Resolve claim' : 'Complete follow-up'}</button> : null}
+                {pending ? <span className="tag tag-amber">{t('Approval pending')}</span> : null}
+                {pending && canApprove ? <button type="button" className="secondary-button" onClick={() => onOpenApprovals({ approvalId: pending.id })}><ShieldCheck size={14} />{t('Review')}</button> : null}
+                {!pending && canCoordinate && activeStatuses.has(record.status) ? <button type="button" className="secondary-button" disabled={submitting} onClick={() => onLifecycle(view, record)}><ClipboardCheck size={14} />{view === 'punch_item' ? t('Resolve punch') : view === 'warranty_claim' ? t('Resolve claim') : t('Complete follow-up')}</button> : null}
               </div>
             </article>
           )
-        }) : <p className="workflow-note">No {view === 'punch_item' ? 'punch items' : view === 'warranty_claim' ? 'warranty claims' : view === 'aftercare' ? 'aftercare follow-ups' : 'client feedback'} are retained for this job.</p>}
+        }) : <p className="workflow-note">{view === 'punch_item'
+          ? t('No punch items are retained for this job.')
+          : view === 'warranty_claim'
+            ? t('No warranty claims are retained for this job.')
+            : view === 'aftercare'
+              ? t('No aftercare follow-ups are retained for this job.')
+              : t('No client feedback is retained for this job.')}</p>}
       </div>
-      {fieldScoped ? <p className="workflow-note">Assigned field workers can capture punch evidence. Resolution, acceptance, and client visibility remain office-controlled.</p> : null}
+      {fieldScoped ? <p className="workflow-note">{t('Assigned field workers can capture punch evidence. Resolution, acceptance, and client visibility remain office-controlled.')}</p> : null}
     </section>
   )
 }

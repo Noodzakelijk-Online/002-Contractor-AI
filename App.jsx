@@ -3071,6 +3071,7 @@ function App() {
   const [portalLink, setPortalLink] = useState('')
   const [notice, setNotice] = useState(null)
   const [localeSaving, setLocaleSaving] = useState(false)
+  const [operatorLocaleOverride, setOperatorLocaleOverride] = useState(null)
   const [intake, setIntake] = useState({ clientName: '', title: '', service: '', address: '', description: '', priority: 'medium' })
   const [evidence, setEvidence] = useState(() => emptyFieldEvidenceDraft())
   const [fieldPhotoEvidenceSets, setFieldPhotoEvidenceSets] = useState([])
@@ -3315,7 +3316,7 @@ function App() {
 
   const dashboard = data?.dashboard
   const operator = data?.session?.operator || { role: 'owner' }
-  const operatorLocale = normalizeLocale(operator.preferences?.locale)
+  const operatorLocale = normalizeLocale(operatorLocaleOverride || operator.preferences?.locale)
   const [operatorTranslator, setOperatorTranslator] = useState(null)
   const ot = (key, variables = {}) => operatorLocale === 'nl-NL' && operatorTranslator
     ? operatorTranslator(operatorLocale, key, variables)
@@ -3711,6 +3712,7 @@ function App() {
       setAuthError('')
       try {
         await api('/api/auth/login', { method: 'POST', body: JSON.stringify({ token }) })
+        setOperatorLocaleOverride(null)
         await refresh()
         return true
       } catch (requestError) {
@@ -3728,6 +3730,7 @@ function App() {
     try {
       await api('/api/auth/logout', { method: 'POST' })
       clearSessionDraftScope(browserDraftStorage(), outboxScope)
+      setOperatorLocaleOverride(null)
       setData(null)
       setAuthError('')
       setAuthState('required')
@@ -3745,6 +3748,7 @@ function App() {
   async function updateOperatorLocale(nextLocale) {
     const locale = normalizeLocale(nextLocale)
     if (locale === operatorLocale || localeSaving) return
+    setOperatorLocaleOverride(locale)
     setLocaleSaving(true)
     try {
       const result = await api('/api/preferences', {
@@ -3759,6 +3763,7 @@ function App() {
         },
       } : current)
     } catch (requestError) {
+      setOperatorLocaleOverride(null)
       setError(requestError.message)
     } finally {
       setLocaleSaving(false)
@@ -7667,7 +7672,7 @@ function App() {
           ...(current.inspectionTemplates || []).filter((template) => template.id !== result.template.id),
         ],
       } : current)
-      notify(`${result.template.name} retained as reusable inspection template v${result.template.versionNumber}.`)
+      notify(ot('{name} retained as reusable inspection template v{version}.', { name: result.template.name, version: result.template.versionNumber }))
       return result.template
     } catch (requestError) {
       setError(requestError.message)
@@ -7687,7 +7692,7 @@ function App() {
         body: JSON.stringify(payload),
       })
       setSelectedJob(result.job)
-      notify(`${result.photoEvidenceSet.title} scheduled. Task completion now requires released before, during, and after evidence.`)
+      notify(ot('{title} scheduled. Task completion now requires released before, during, and after evidence.', { title: result.photoEvidenceSet.title }))
       await refresh()
       return result.photoEvidenceSet
     } catch (requestError) {
@@ -7715,8 +7720,8 @@ function App() {
       } : current)
       notify(
         result.replayed
-          ? 'The exact photo-evidence review request was already retained.'
-          : 'The checksum-protected before/during/after sequence is waiting for independent approval.',
+          ? ot('The exact photo-evidence review request was already retained.')
+          : ot('The checksum-protected before/during/after sequence is waiting for independent approval.'),
       )
       return result
     } catch (requestError) {
@@ -7737,7 +7742,7 @@ function App() {
         body: JSON.stringify({ ...payload, actor: 'office_operator' }),
       })
       setSelectedJob(result.job)
-      notify(`${result.inspection.title} scheduled with an immutable template snapshot.`)
+      notify(ot('{title} scheduled with an immutable template snapshot.', { title: result.inspection.title }))
       await refresh()
       return result.inspection
     } catch (requestError) {
@@ -7764,15 +7769,17 @@ function App() {
       if (navigator.onLine === false) {
         await enqueueFieldOperationDraft(draft)
         await refreshOutboxState()
-        notify('Inspection checklist saved locally for this operator and scheduled for exact retry after reconnection.')
+        notify(ot('Inspection checklist saved locally for this operator and scheduled for exact retry after reconnection.'))
         return { queued: true }
       }
       const result = await recordFieldOperation(draft)
       setSelectedJob(result.job)
       notify(
         result.replayed
-          ? 'This checklist submission was already retained; no duplicate observations or approval were created.'
-          : `${result.submission.failedCount} failed item(s) retained with corrective observations. Inspection sign-off is waiting for approval.`,
+          ? ot('This checklist submission was already retained; no duplicate observations or approval were created.')
+          : result.submission.failedCount === 1
+            ? ot('{count} failed item retained with corrective observations. Inspection sign-off is waiting for approval.', { count: result.submission.failedCount })
+            : ot('{count} failed items retained with corrective observations. Inspection sign-off is waiting for approval.', { count: result.submission.failedCount }),
       )
       await refresh()
       return result
@@ -7781,7 +7788,7 @@ function App() {
         try {
           await enqueueFieldOperationDraft(draft)
           await refreshOutboxState()
-          notify('Connection interrupted. The complete inspection checklist was saved locally for an exact retry.')
+          notify(ot('Connection interrupted. The complete inspection checklist was saved locally for an exact retry.'))
           return { queued: true }
         } catch (outboxError) {
           setError(outboxError.message)
@@ -7950,7 +7957,7 @@ function App() {
   async function createCloseoutRecord(recordType, values) {
     if (!selectedJobId || !['punch_item', 'warranty_claim', 'aftercare', 'client_feedback'].includes(recordType)) return null
     if (recordType !== 'punch_item' && (!canCoordinate || navigator.onLine === false)) {
-      setError('Reconnect before retaining warranty, aftercare, or feedback records. Offline exact retry is limited to field punch capture.')
+      setError(ot('Reconnect before retaining warranty, aftercare, or feedback records. Offline exact retry is limited to field punch capture.'))
       return null
     }
 
@@ -7974,13 +7981,13 @@ function App() {
         if (navigator.onLine === false) {
           await enqueueFieldOperationDraft(draft)
           await refreshOutboxState()
-          notify('Punch item saved locally for this operator and scheduled for exact retry after reconnection.')
+          notify(ot('Punch item saved locally for this operator and scheduled for exact retry after reconnection.'))
           return { queued: true }
         }
         const result = await recordFieldOperation(draft)
         setSelectedJob(result.job)
         setData((current) => current ? reconcileJobCollections({ ...current, dashboard: result.dashboard || current.dashboard }, result.job) : current)
-        notify(result.replayed ? 'This punch item was already retained; no duplicate record or approval was created.' : 'Punch item retained. Resolution and client visibility remain approval-gated.')
+        notify(result.replayed ? ot('This punch item was already retained; no duplicate record or approval was created.') : ot('Punch item retained. Resolution and client visibility remain approval-gated.'))
         await refresh()
         return result
       } catch (requestError) {
@@ -7988,7 +7995,7 @@ function App() {
           try {
             await enqueueFieldOperationDraft(draft)
             await refreshOutboxState()
-            notify('Connection interrupted. The punch item was saved locally for an exact retry.')
+            notify(ot('Connection interrupted. The punch item was saved locally for an exact retry.'))
             return { queued: true }
           } catch (outboxError) {
             setError(outboxError.message)
@@ -8022,10 +8029,10 @@ function App() {
       setSelectedJob(result.job)
       setData((current) => current ? reconcileJobCollections({ ...current, dashboard: result.dashboard || current.dashboard }, result.job) : current)
       notify(recordType === 'warranty_claim'
-        ? 'Warranty claim retained for internal review. No liability, visit, remedy, or client commitment was accepted.'
+        ? ot('Warranty claim retained for internal review. No liability, visit, remedy, or client commitment was accepted.')
         : recordType === 'client_feedback'
-          ? 'Client feedback retained as immutable NPS, satisfaction, and effort evidence. No review or referral request was sent.'
-          : 'Aftercare follow-up retained internally. No message was delivered and no work was booked.')
+          ? ot('Client feedback retained as immutable NPS, satisfaction, and effort evidence. No review or referral request was sent.')
+          : ot('Aftercare follow-up retained internally. No message was delivered and no work was booked.'))
       await refresh()
       return result
     } catch (requestError) {
@@ -10365,15 +10372,15 @@ function App() {
         body: JSON.stringify({
           markCompleted: false,
           createRecurringPlan: false,
-          completionNote: 'Closeout preparation does not change job completion status.',
+          completionNote: ot('Closeout preparation does not change job completion status.'),
           actor: 'office_operator',
         }),
       })
       const reused = Object.values(result.closeout?.reused || {}).filter(Boolean).length
       notify(
         reused
-          ? 'The existing closeout package was retained without creating duplicates.'
-          : 'Closeout package retained. Invoice issue and client handover remain approval-gated; nothing was sent.',
+          ? ot('The existing closeout package was retained without creating duplicates.')
+          : ot('Closeout package retained. Invoice issue and client handover remain approval-gated; nothing was sent.'),
       )
       await refresh()
     } catch (requestError) {
@@ -10397,8 +10404,8 @@ function App() {
       })
       notify(
         result.package?.replayed
-          ? 'The current handover dossier was verified and retained without creating duplicates.'
-          : 'Immutable handover dossier retained. Client delivery is a separate approval-gated step.',
+          ? ot('The current handover dossier was verified and retained without creating duplicates.')
+          : ot('Immutable handover dossier retained. Client delivery is a separate approval-gated step.'),
       )
       await refresh()
     } catch (requestError) {
@@ -10411,10 +10418,12 @@ function App() {
   async function draftClientFollowup(item) {
     if (!item?.jobId || item.counts?.outboundDrafts || item.flags?.approvalRequired) return
     const selection = item.latest?.selection
-    const subject = selection?.title ? `Selection reminder: ${selection.title}` : `Client follow-up: ${item.jobTitle || 'project update'}`
+    const subject = selection?.title
+      ? ot('Selection reminder: {selection}', { selection: selection.title })
+      : ot('Client follow-up: {project}', { project: item.jobTitle || ot('project update') })
     const body = selection?.title
-      ? `Please review the retained options for ${selection.title}. Confirm the preferred selection so planning can continue; no choice has been assumed.`
-      : `Please confirm the outstanding decision or reply for ${item.jobTitle || 'this project'}. This is a draft for internal review and has not been sent.`
+      ? ot('Please review the retained options for {selection}. Confirm the preferred selection so planning can continue; no choice has been assumed.', { selection: selection.title })
+      : ot('Please confirm the outstanding decision or reply for {project}. This is a draft for internal review and has not been sent.', { project: item.jobTitle || ot('this project') })
     setSubmitting(true)
     try {
       await api(`/api/ledger/jobs/${encodeURIComponent(item.jobId)}/communication`, {
@@ -10430,7 +10439,7 @@ function App() {
           actor: 'office_operator',
         }),
       })
-      notify('Client follow-up drafted behind an approval gate. No message was delivered.')
+      notify(ot('Client follow-up drafted behind an approval gate. No message was delivered.'))
       await refresh()
     } catch (requestError) {
       setError(requestError.message)
@@ -10451,11 +10460,11 @@ function App() {
           intervalRule: 'quarterly',
           nextDueAt: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000).toISOString(),
           approvalRequiredBeforeBooking: true,
-          notes: 'Internal recurring-service proposal. Scope, price, date, and client acceptance remain uncommitted.',
+          notes: ot('Internal recurring-service proposal. Scope, price, date, and client acceptance remain uncommitted.'),
           actor: 'office_operator',
         }),
       })
-      notify('Recurring-service proposal retained as an internal draft. Nothing was booked or offered to the client.')
+      notify(ot('Recurring-service proposal retained as an internal draft. Nothing was booked or offered to the client.'))
       await refresh()
     } catch (requestError) {
       setError(requestError.message)
@@ -10466,7 +10475,7 @@ function App() {
 
   function openClientLifecycle(item, type, recordId) {
     if (!item?.jobId || !recordId) {
-      setError('The client action is not linked to a retained lifecycle record.')
+      setError(ot('The client action is not linked to a retained lifecycle record.'))
       return
     }
     const labels = {
@@ -10476,7 +10485,7 @@ function App() {
       aftercare: 'Complete aftercare follow-up',
     }
     const record = type === 'selection' ? item.latest?.selection : null
-    setClientAction({ item, type, recordId, record, label: labels[type] || 'Client lifecycle review' })
+    setClientAction({ item, type, recordId, record, label: ot(labels[type] || 'Client lifecycle review') })
     setClientActionNotes('')
     setClientActionOption(record?.data?.selectedOption || record?.options?.[0] || '')
     setClientActionReference('')
@@ -10484,7 +10493,7 @@ function App() {
 
   function openJobCloseoutLifecycle(type, record) {
     if (!selectedJob?.id || !record?.id || !['punch_item', 'warranty_claim', 'aftercare'].includes(type)) {
-      setError('The closeout action is not linked to a retained job record.')
+      setError(ot('The closeout action is not linked to a retained job record.'))
       return
     }
     openClientLifecycle({
@@ -10511,11 +10520,11 @@ function App() {
     const notes = clientActionNotes.trim()
     const selectionDecision = clientAction?.type === 'selection'
     if (!clientAction?.item?.jobId || !clientAction.recordId || !notes) {
-      setError('Record the evidence or outcome before changing this client lifecycle state.')
+      setError(ot('Record the evidence or outcome before changing this client lifecycle state.'))
       return
     }
     if (selectionDecision && (!clientActionOption || !clientActionReference.trim())) {
-      setError('Choose the retained client option and record its confirmation reference.')
+      setError(ot('Choose the retained client option and record its confirmation reference.'))
       return
     }
     const status = clientAction.type === 'aftercare' ? 'completed' : selectionDecision ? 'selected' : 'resolved'
@@ -10541,8 +10550,8 @@ function App() {
       }
       notify(
         result.approvalRequired
-          ? `${clientAction.label} retained as a pending approval; the client-facing outcome has not been committed.`
-          : 'Aftercare outcome completed in the internal ledger. No client message was sent.',
+          ? ot('{action} retained as a pending approval; the client-facing outcome has not been committed.', { action: clientAction.label })
+          : ot('Aftercare outcome completed in the internal ledger. No client message was sent.'),
       )
       closeClientLifecycle()
       await refresh()
@@ -11697,6 +11706,7 @@ function App() {
                   clients={data.clients}
                   directory={data.clientDirectory}
                   jobs={jobs}
+                  locale={operatorLocale}
                   canCoordinate={canCoordinate}
                   canApprove={capabilities.approvals === true}
                   submitting={submitting}
@@ -15896,6 +15906,7 @@ function App() {
                   ) : null}
                   <PhotoEvidenceControl
                     job={selectedJob}
+                    locale={operatorLocale}
                     canCoordinate={canCoordinate}
                     canApprove={capabilities.approvals === true}
                     submitting={submitting}
@@ -15906,6 +15917,7 @@ function App() {
                   <InspectionChecklistControl
                     job={selectedJob}
                     templates={inspectionTemplates}
+                    locale={operatorLocale}
                     canCoordinate={canCoordinate}
                     canApprove={capabilities.approvals === true}
                     fieldScoped={fieldScoped}
@@ -15943,6 +15955,7 @@ function App() {
                   />
                   <CloseoutRegister
                     job={selectedJob}
+                    locale={operatorLocale}
                     canReportPunch={canCoordinate || capabilities.fieldEvidence === true}
                     canCoordinate={canCoordinate}
                     canApprove={capabilities.approvals === true}
@@ -18291,7 +18304,7 @@ function App() {
                 >
                   <ShieldCheck size={16} />
                   {submitting
-                    ? 'Recording...'
+                    ? ot('Recording...')
                     : resourceAction.action.type === 'complete_worker_orientation'
                       ? 'Request orientation approval'
                       : resourceAction.action.type === 'prepare_site_access'
@@ -18515,13 +18528,13 @@ function App() {
           >
             <div className="modal-heading">
               <div>
-                <p className="eyebrow">Retained client lifecycle</p>
+                <p className="eyebrow">{ot('Retained client lifecycle')}</p>
                 <h2 id="client-action-title">{clientAction.label}</h2>
                 <p>
-                  {clientAction.item.jobTitle} · {clientAction.item.clientName || 'Client record'}
+                  {clientAction.item.jobTitle} / {clientAction.item.clientName || ot('Client record')}
                 </p>
               </div>
-              <button className="icon-button" aria-label="Close client lifecycle review" onClick={closeClientLifecycle}>
+              <button className="icon-button" aria-label={ot('Close client lifecycle review')} onClick={closeClientLifecycle}>
                 <X size={18} />
               </button>
             </div>
@@ -18530,9 +18543,9 @@ function App() {
                 {clientAction.type === 'selection' ? (
                   <>
                     <label>
-                      Retained option
+                      {ot('Retained option')}
                       <select required value={clientActionOption} onChange={(event) => setClientActionOption(event.target.value)}>
-                        <option value="">Select the confirmed option</option>
+                        <option value="">{ot('Select the confirmed option')}</option>
                         {(clientAction.record?.options || []).map((option) => (
                           <option key={option} value={option}>
                             {option}
@@ -18541,31 +18554,31 @@ function App() {
                       </select>
                     </label>
                     <label>
-                      Client confirmation reference
+                      {ot('Client confirmation reference')}
                       <input
                         required
                         value={clientActionReference}
                         onChange={(event) => setClientActionReference(event.target.value)}
-                        placeholder="Portal reply, signed form, email, or call record"
+                        placeholder={ot('Portal reply, signed form, email, or call record')}
                       />
                     </label>
                   </>
                 ) : null}
                 <label className="form-span">
-                  Evidence and outcome
+                  {ot('Evidence and outcome')}
                   <textarea
                     required
                     value={clientActionNotes}
                     onChange={(event) => setClientActionNotes(event.target.value)}
-                    placeholder="Record what was inspected, completed, agreed, or still needs review."
+                    placeholder={ot('Record what was inspected, completed, agreed, or still needs review.')}
                   />
                 </label>
                 <p className="workflow-note form-span">
                   {clientAction.type === 'aftercare'
-                    ? 'Completing aftercare updates the internal ledger only. It does not send a client message.'
+                    ? ot('Completing aftercare updates the internal ledger only. It does not send a client message.')
                     : clientAction.type === 'selection'
-                      ? 'The selected option remains pending until an approver reviews the confirmation evidence. No procurement, scope, price, or schedule commitment is made here.'
-                      : 'The requested resolution remains pending until an approver reviews it. No acceptance or warranty commitment is communicated from this screen.'}
+                      ? ot('The selected option remains pending until an approver reviews the confirmation evidence. No procurement, scope, price, or schedule commitment is made here.')
+                      : ot('The requested resolution remains pending until an approver reviews it. No acceptance or warranty commitment is communicated from this screen.')}
                 </p>
               </div>
               <div className="modal-actions">
@@ -18584,10 +18597,10 @@ function App() {
                   {submitting
                     ? 'Recording...'
                     : clientAction.type === 'aftercare'
-                      ? 'Complete internal follow-up'
+                      ? ot('Complete internal follow-up')
                       : clientAction.type === 'selection'
-                        ? 'Request selection approval'
-                        : 'Request resolution approval'}
+                        ? ot('Request selection approval')
+                        : ot('Request resolution approval')}
                 </button>
               </div>
             </form>
@@ -18666,7 +18679,7 @@ function App() {
               </div>
               <div className="modal-actions">
                 <button type="button" className="secondary-button" disabled={submitting} onClick={closeFinanceOrderDelivery}>
-                  Cancel
+                  {ot('Cancel')}
                 </button>
                 <button
                   className="primary-button"

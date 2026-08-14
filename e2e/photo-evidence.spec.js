@@ -2,6 +2,7 @@ const { test, expect } = require('@playwright/test');
 
 async function openJob(page, title) {
   await page.goto('/');
+  await page.getByLabel(/^(Language|Taal)$/).selectOption('en-GB');
   await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible();
   await page.getByRole('button', { name: `Open ${title}` }).first().click();
   const workspace = page.getByTestId('job-workspace');
@@ -129,6 +130,14 @@ test('operator governs before, during, and after photographs through task comple
   row = control.locator('.photo-evidence-row').filter({ hasText: 'Install browser-tested roof outlet' });
   await expect(row.getByText('released', { exact: true })).toBeVisible();
   await expect(row.getByRole('link', { name: /roof-outlet\.jpg/ })).toHaveCount(3);
+
+  await page.locator('header').getByLabel('Language', { exact: true }).selectOption('nl-NL');
+  await expect(control.getByRole('heading', { name: 'Onderbouwing voor, tijdens en na het werk' })).toBeVisible();
+  await expect(row.getByText('vrijgegeven', { exact: true })).toBeVisible();
+  await expect(row).toContainText('Install browser-tested roof outlet');
+  await expect(row).toContainText('Building B / Roof / Outlet 07');
+  await expect(row.getByRole('link', { name: /roof-outlet\.jpg/ })).toHaveCount(3);
+  await page.locator('header').getByLabel('Taal', { exact: true }).selectOption('en-GB');
 
   await page.setViewportSize({ width: 390, height: 844 });
   const geometry = await control.evaluate(element => ({
