@@ -5,6 +5,11 @@ Versioning for the application contract; database migrations remain append-only.
 
 ## Unreleased
 
+- Localized owner business onboarding and identity, managed team access, autonomous
+  safety controls, and QA archive maintenance. Added a Dutch mobile owner journey
+  covering retained identity, one-time access-key handling, key rotation,
+  deactivation, suspend/resume, QA preview, English round trip, accessibility,
+  responsive containment, exact API evidence, and empty browser error logs.
 - Added migration 072 with self-scoped, audited NL/EN operator preferences that survive local restart and local-to-hosted migration.
 - Added retained language selection to approval-gated client portal links, plus a token-scoped client language control.
 - Localized the operator shell and complete client portal, including locale-aware dates, numbers, and EUR values.

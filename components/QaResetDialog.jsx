@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
 import { Archive, FolderArchive, RefreshCw, TriangleAlert, X } from 'lucide-react'
+import { operatorText } from '../operator-locale'
 import './QaResetDialog.css'
 
 const CONFIRMATION_PHRASE = 'ARCHIVE QA'
 
-export default function QaResetDialog({ plan, loading, busy, error, onClose, onReload, onSubmit }) {
+export default function QaResetDialog({ plan, loading, busy, error, onClose, onReload, onSubmit, locale = 'en-GB' }) {
+  const t = (key, variables) => operatorText(locale, key, variables)
   const [reason, setReason] = useState('')
   const [confirmation, setConfirmation] = useState('')
   const [validationError, setValidationError] = useState('')
@@ -44,15 +46,15 @@ export default function QaResetDialog({ plan, loading, busy, error, onClose, onR
     event.preventDefault()
     const trimmedReason = reason.trim()
     if (trimmedReason.length < 8) {
-      setValidationError('Record at least 8 characters explaining why these test records should be archived.')
+      setValidationError(t('Record at least 8 characters explaining why these test records should be archived.'))
       return
     }
     if (confirmation.trim() !== CONFIRMATION_PHRASE) {
-      setValidationError(`Type ${CONFIRMATION_PHRASE} exactly to confirm this maintenance action.`)
+      setValidationError(t('Type {phrase} exactly to confirm this maintenance action.', { phrase: CONFIRMATION_PHRASE }))
       return
     }
     if (!plan?.planHash || !plan.totalRecords) {
-      setValidationError('Load a current preview containing eligible QA or demo records before continuing.')
+      setValidationError(t('Load a current preview containing eligible QA or demo records before continuing.'))
       return
     }
     setValidationError('')
@@ -82,13 +84,13 @@ export default function QaResetDialog({ plan, loading, busy, error, onClose, onR
       >
         <div className="modal-heading qa-reset-heading">
           <div>
-            <p className="eyebrow">Owner data maintenance</p>
-            <h2 id="qa-reset-title" ref={headingRef} tabIndex="-1">Archive QA and demo records</h2>
+            <p className="eyebrow">{t('Owner data maintenance')}</p>
+            <h2 id="qa-reset-title" ref={headingRef} tabIndex="-1">{t('Archive QA and demo records')}</h2>
             <p id="qa-reset-description">
-              Review the current ledger set. Contractor.AI creates a verified local backup before applying one atomic archive operation.
+              {t('Review the current ledger set. Contractor.AI creates a verified local backup before applying one atomic archive operation.')}
             </p>
           </div>
-          <button type="button" className="icon-button" aria-label="Close QA archive dialog" disabled={busy} onClick={onClose}>
+          <button type="button" className="icon-button" aria-label={t('Close QA archive dialog')} disabled={busy} onClick={onClose}>
             <X size={18} />
           </button>
         </div>
@@ -97,45 +99,45 @@ export default function QaResetDialog({ plan, loading, busy, error, onClose, onR
           {loading ? (
             <div className="qa-reset-loading" role="status">
               <RefreshCw size={18} className="spin" aria-hidden="true" />
-              <span>Checking the current QA and demo record set...</span>
+              <span>{t('Checking the current QA and demo record set...')}</span>
             </div>
           ) : plan ? (
             <>
-              <div className="qa-reset-counts" aria-label="Records included in this archive preview">
-                <div><span>Jobs</span><strong>{counts.jobs || 0}</strong></div>
-                <div><span>Opportunities</span><strong>{counts.opportunities || 0}</strong></div>
-                <div><span>Workers</span><strong>{counts.workers || 0}</strong></div>
-                <div><span>Equipment</span><strong>{counts.tools || 0}</strong></div>
-                <div><span>Pending approvals</span><strong>{counts.approvals || 0}</strong></div>
+              <div className="qa-reset-counts" aria-label={t('Records included in this archive preview')}>
+                <div><span>{t('Jobs')}</span><strong>{counts.jobs || 0}</strong></div>
+                <div><span>{t('Opportunities')}</span><strong>{counts.opportunities || 0}</strong></div>
+                <div><span>{t('Workers')}</span><strong>{counts.workers || 0}</strong></div>
+                <div><span>{t('Equipment')}</span><strong>{counts.tools || 0}</strong></div>
+                <div><span>{t('Pending approvals')}</span><strong>{counts.approvals || 0}</strong></div>
               </div>
 
               {plan.samples?.length ? (
                 <div className="qa-reset-samples">
-                  <h3>Included records</h3>
+                  <h3>{t('Included records')}</h3>
                   <ul>
                     {plan.samples.map((record) => (
                       <li key={`${record.type}:${record.id}`}>
-                        <span>{record.type}</span>
+                        <span>{t(record.type)}</span>
                         <strong>{record.label}</strong>
                       </li>
                     ))}
                   </ul>
-                  {plan.totalRecords > plan.sampleLimit ? <small>Showing the first {plan.sampleLimit} of {plan.totalRecords} records.</small> : null}
+                  {plan.totalRecords > plan.sampleLimit ? <small>{t('Showing the first {limit} of {total} records.', { limit: plan.sampleLimit, total: plan.totalRecords })}</small> : null}
                 </div>
               ) : (
-                <p className="qa-reset-empty" role="status">No eligible QA or demo records are currently active.</p>
+                <p className="qa-reset-empty" role="status">{t('No eligible QA or demo records are currently active.')}</p>
               )}
 
               <div className="qa-reset-backup-note">
                 <FolderArchive size={18} aria-hidden="true" />
                 <p>
-                  <strong>Recovery package required</strong>
-                  <span>The archive starts only after a verified SQLite and evidence backup has been created.</span>
+                  <strong>{t('Recovery package required')}</strong>
+                  <span>{t('The archive starts only after a verified SQLite and evidence backup has been created.')}</span>
                 </p>
               </div>
 
               <label className="qa-reset-reason">
-                Maintenance reason
+                {t('Maintenance reason')}
                 <textarea
                   required
                   minLength="8"
@@ -147,13 +149,13 @@ export default function QaResetDialog({ plan, loading, busy, error, onClose, onR
                     setReason(event.target.value)
                     setValidationError('')
                   }}
-                  placeholder="State why these QA or demo records should leave active operating queues."
+                  placeholder={t('State why these QA or demo records should leave active operating queues.')}
                 />
-                <small>{reason.trim().length}/500 characters; at least 8 required.</small>
+                <small>{t('{count}/500 characters; at least 8 required.', { count: reason.trim().length })}</small>
               </label>
 
               <label className="qa-reset-confirmation">
-                Type {CONFIRMATION_PHRASE} to confirm
+                {t('Type {phrase} to confirm', { phrase: CONFIRMATION_PHRASE })}
                 <input
                   required
                   autoComplete="off"
@@ -169,7 +171,7 @@ export default function QaResetDialog({ plan, loading, busy, error, onClose, onR
           ) : null}
 
           <p className="workflow-note qa-reset-boundary">
-            Verified wins are excluded. This action does not delete retained evidence, send a message, spend money, or make an external commitment.
+            {t('Verified wins are excluded. This action does not delete retained evidence, send a message, spend money, or make an external commitment.')}
           </p>
 
           {decisionError ? (
@@ -181,16 +183,16 @@ export default function QaResetDialog({ plan, loading, busy, error, onClose, onR
         </div>
 
         <div className="modal-actions qa-reset-actions">
-          <button type="button" className="secondary-button" disabled={busy} onClick={onClose}>Cancel</button>
+          <button type="button" className="secondary-button" disabled={busy} onClick={onClose}>{t('Cancel')}</button>
           {!loading && (!plan || decisionError) ? (
             <button type="button" className="secondary-button" disabled={busy} onClick={onReload}>
               <RefreshCw size={16} />
-              Refresh preview
+              {t('Refresh preview')}
             </button>
           ) : null}
           <button className="danger-button" disabled={submitDisabled}>
             <Archive size={16} />
-            {busy ? 'Creating backup and archiving...' : `Archive ${plan?.totalRecords || 0} record(s)`}
+            {busy ? t('Creating backup and archiving...') : t('Archive {count} record(s)', { count: plan?.totalRecords || 0 })}
           </button>
         </div>
       </form>

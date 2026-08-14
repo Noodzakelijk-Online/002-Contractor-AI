@@ -1,5 +1,22 @@
 # Codex Worklog
 
+## 2026-08-14 - Owner administration bilingual and browser standards pass
+
+- Localized business onboarding and retained identity, managed team access,
+  autonomous safety suspend/resume, and QA archive maintenance while preserving
+  canonical roles, statuses, safety reasons, confirmation phrases, access-key
+  secrecy, and retained organization values.
+- Added a Dutch mobile owner journey covering onboarding, exact API identity,
+  operator creation, one-time key presentation, rotation, deactivation, safety
+  controls, QA preview, English round trip, axe, containment, and empty error logs.
+- Browser and accessibility testing found and fixed three invalid HTML patterns
+  and three low-contrast metadata/step-label defects in the production interface.
+- Current-source gates pass: 3,329 unique specialist translation keys, 10 frontend
+  tests, 535 Node tests (499 passed and 36 PostgreSQL/environment skips) in 70.1
+  seconds, all 99 Chromium workflows in 25 isolated batches in 498.2 seconds,
+  release/HAI/lint/build/bundle at 455,338 total gzip bytes, production benchmark,
+  hardened container, and Node 22.23.2 Windows standalone verification.
+
 ## 2026-08-14 - Equipment lifecycle and custody bilingual pass
 
 - Localized the complete equipment register, office and field custody handoff,

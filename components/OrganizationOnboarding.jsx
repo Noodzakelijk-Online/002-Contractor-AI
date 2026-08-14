@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { ArrowLeft, Building2, Check, ChevronRight, MapPin, ReceiptEuro, ShieldCheck, TriangleAlert, X } from 'lucide-react'
+import { operatorText } from '../operator-locale'
 import './OrganizationOnboarding.css'
 
 const STEPS = [
@@ -29,7 +30,8 @@ function validDays(value) {
   return Number.isInteger(days) && days >= 1 && days <= 365
 }
 
-export default function OrganizationOnboarding({ draft, organization, busy, onChange, onVatExemptChange, onSave, onClose }) {
+export default function OrganizationOnboarding({ draft, organization, busy, onChange, onVatExemptChange, onSave, onClose, locale = 'en-GB' }) {
+  const t = (key, variables) => operatorText(locale, key, variables)
   const [step, setStep] = useState(0)
   const [savedOrganization, setSavedOrganization] = useState(organization)
   const [statusMessage, setStatusMessage] = useState('')
@@ -50,7 +52,7 @@ export default function OrganizationOnboarding({ draft, organization, busy, onCh
     && validDays(draft.defaultQuoteValidityDays)
     && (hasText(draft.electronicAddressScheme) === hasText(draft.electronicAddress))
   const stepValid = [identityComplete, contactComplete, billingComplete, readiness.ready][step]
-  const progressLabel = `${step + 1} of ${STEPS.length}`
+  const progressLabel = t('{current} of {total}', { current: step + 1, total: STEPS.length })
 
   const firstMissingStep = useMemo(() => {
     const mapped = readiness.missing
@@ -100,7 +102,7 @@ export default function OrganizationOnboarding({ draft, organization, busy, onCh
     const saved = await onSave()
     if (!saved) return
     setSavedOrganization(saved)
-    setStatusMessage(`${STEPS[step].label} details saved to the operating ledger.`)
+    setStatusMessage(t('{section} details saved to the operating ledger.', { section: t(STEPS[step].label) }))
     setStep((current) => Math.min(current + 1, STEPS.length - 1))
   }
 
@@ -109,24 +111,24 @@ export default function OrganizationOnboarding({ draft, organization, busy, onCh
       return (
         <div className="onboarding-fields">
           <label>
-            Legal name
+            {t('Legal name')}
             <input required autoComplete="organization" value={draft.legalName} onChange={(event) => onChange('legalName', event.target.value)} />
           </label>
           <label>
-            Trading name
+            {t('Trading name')}
             <input value={draft.tradingName} onChange={(event) => onChange('tradingName', event.target.value)} />
           </label>
           <label>
-            Registration number
+            {t('Registration number')}
             <input
               required
               value={draft.registrationNumber}
               onChange={(event) => onChange('registrationNumber', event.target.value)}
-              placeholder="KVK or national registry number"
+              placeholder={t('KVK or national registry number')}
             />
           </label>
           <label>
-            VAT number
+            {t('VAT number')}
             <input
               required={!draft.vatExempt}
               disabled={draft.vatExempt}
@@ -136,7 +138,7 @@ export default function OrganizationOnboarding({ draft, organization, busy, onCh
           </label>
           <label className="checkbox-label onboarding-wide">
             <input type="checkbox" checked={draft.vatExempt} onChange={(event) => onVatExemptChange(event.target.checked)} />
-            This legal entity is VAT exempt
+            {t('This legal entity is VAT exempt')}
           </label>
         </div>
       )
@@ -146,19 +148,19 @@ export default function OrganizationOnboarding({ draft, organization, busy, onCh
       return (
         <div className="onboarding-fields">
           <label className="onboarding-wide">
-            Registered address
+            {t('Registered address')}
             <input required autoComplete="street-address" value={draft.address} onChange={(event) => onChange('address', event.target.value)} />
           </label>
           <label>
-            Postal code
+            {t('Postal code')}
             <input required autoComplete="postal-code" value={draft.postalCode} onChange={(event) => onChange('postalCode', event.target.value)} />
           </label>
           <label>
-            City
+            {t('City')}
             <input required autoComplete="address-level2" value={draft.city} onChange={(event) => onChange('city', event.target.value)} />
           </label>
           <label>
-            Country code
+            {t('Country code')}
             <input
               required
               maxLength="2"
@@ -168,20 +170,20 @@ export default function OrganizationOnboarding({ draft, organization, busy, onCh
             />
           </label>
           <label>
-            Email
+            {t('Email')}
             <input type="email" autoComplete="email" value={draft.email} onChange={(event) => onChange('email', event.target.value)} />
           </label>
           <label>
-            Phone
+            {t('Phone')}
             <input type="tel" autoComplete="tel" value={draft.phone} onChange={(event) => onChange('phone', event.target.value)} />
           </label>
           <label className="onboarding-wide">
-            Website
+            {t('Website')}
             <input type="url" autoComplete="url" value={draft.website} onChange={(event) => onChange('website', event.target.value)} placeholder="https://" />
           </label>
           {!hasText(draft.email) && !hasText(draft.phone) ? (
             <p className="onboarding-validation onboarding-wide" role="status">
-              <TriangleAlert size={15} /> Add an email address or phone number.
+              <TriangleAlert size={15} /> {t('Add an email address or phone number.')}
             </p>
           ) : null}
         </div>
@@ -192,19 +194,19 @@ export default function OrganizationOnboarding({ draft, organization, busy, onCh
       return (
         <div className="onboarding-fields">
           <label>
-            Electronic address scheme
+            {t('Electronic address scheme')}
             <input
               value={draft.electronicAddressScheme}
               onChange={(event) => onChange('electronicAddressScheme', event.target.value)}
-              placeholder="0106 for KVK"
+              placeholder={t('0106 for KVK')}
             />
           </label>
           <label>
-            Electronic address
+            {t('Electronic address')}
             <input
               value={draft.electronicAddress}
               onChange={(event) => onChange('electronicAddress', event.target.value)}
-              placeholder="Peppol endpoint"
+              placeholder={t('Peppol endpoint')}
             />
           </label>
           <label>
@@ -216,7 +218,7 @@ export default function OrganizationOnboarding({ draft, organization, busy, onCh
             <input autoComplete="off" value={draft.bic} onChange={(event) => onChange('bic', event.target.value)} />
           </label>
           <label>
-            Payment terms (days)
+            {t('Payment terms (days)')}
             <input
               required
               type="number"
@@ -227,7 +229,7 @@ export default function OrganizationOnboarding({ draft, organization, busy, onCh
             />
           </label>
           <label>
-            Quote validity (days)
+            {t('Quote validity (days)')}
             <input
               required
               type="number"
@@ -238,16 +240,16 @@ export default function OrganizationOnboarding({ draft, organization, busy, onCh
             />
           </label>
           <label className="onboarding-wide">
-            Quote terms
+            {t('Quote terms')}
             <textarea
               value={draft.quoteTerms}
               onChange={(event) => onChange('quoteTerms', event.target.value)}
-              placeholder="Commercial terms shown on new issue packages."
+              placeholder={t('Commercial terms shown on new issue packages.')}
             />
           </label>
           {hasText(draft.electronicAddressScheme) !== hasText(draft.electronicAddress) ? (
             <p className="onboarding-validation onboarding-wide" role="status">
-              <TriangleAlert size={15} /> Enter both electronic address fields, or leave both empty.
+              <TriangleAlert size={15} /> {t('Enter both electronic address fields, or leave both empty.')}
             </p>
           ) : null}
         </div>
@@ -259,26 +261,26 @@ export default function OrganizationOnboarding({ draft, organization, busy, onCh
         <div className={`onboarding-readiness ${readiness.ready ? 'onboarding-readiness-ready' : 'onboarding-readiness-attention'}`}>
           {readiness.ready ? <ShieldCheck size={20} /> : <TriangleAlert size={20} />}
           <div>
-            <strong>{readiness.ready ? 'Business identity is issue ready' : 'Required details remain'}</strong>
+            <strong>{readiness.ready ? t('Business identity is issue ready') : t('Required details remain')}</strong>
             <p>
               {readiness.ready
-                ? 'Controlled quote and invoice packages can now use this retained identity. Package approval and delivery remain separate decisions.'
-                : `${readiness.missing.length} required item(s) still block commercial issue packages.`}
+                ? t('Controlled quote and invoice packages can now use this retained identity. Package approval and delivery remain separate decisions.')
+                : t('{count} required item(s) still block commercial issue packages.', { count: readiness.missing.length })}
             </p>
           </div>
         </div>
         <dl className="onboarding-summary">
-          <div><dt>Legal entity</dt><dd>{currentOrganization?.legalName || 'Not retained'}</dd></div>
-          <div><dt>Registration</dt><dd>{currentOrganization?.registrationNumber || 'Not retained'}</dd></div>
-          <div><dt>Contact</dt><dd>{currentOrganization?.email || currentOrganization?.phone || 'Not retained'}</dd></div>
-          <div><dt>Registered office</dt><dd>{[currentOrganization?.address, currentOrganization?.postalCode, currentOrganization?.city].filter(Boolean).join(', ') || 'Not retained'}</dd></div>
-          <div><dt>Payment terms</dt><dd>{currentOrganization?.defaultPaymentTermsDays || 30} days</dd></div>
-          <div><dt>Quote validity</dt><dd>{currentOrganization?.defaultQuoteValidityDays || 30} days</dd></div>
+          <div><dt>{t('Legal entity')}</dt><dd>{currentOrganization?.legalName || t('Not retained')}</dd></div>
+          <div><dt>{t('Registration')}</dt><dd>{currentOrganization?.registrationNumber || t('Not retained')}</dd></div>
+          <div><dt>{t('Contact')}</dt><dd>{currentOrganization?.email || currentOrganization?.phone || t('Not retained')}</dd></div>
+          <div><dt>{t('Registered office')}</dt><dd>{[currentOrganization?.address, currentOrganization?.postalCode, currentOrganization?.city].filter(Boolean).join(', ') || t('Not retained')}</dd></div>
+          <div><dt>{t('Payment terms')}</dt><dd>{t('{count} days', { count: currentOrganization?.defaultPaymentTermsDays || 30 })}</dd></div>
+          <div><dt>{t('Quote validity')}</dt><dd>{t('{count} days', { count: currentOrganization?.defaultQuoteValidityDays || 30 })}</dd></div>
         </dl>
         {!readiness.ready ? (
           <div className="onboarding-missing">
-            <strong>Still required</strong>
-            <ul>{readiness.missing.map((item) => <li key={item.field}>{item.label}</li>)}</ul>
+            <strong>{t('Still required')}</strong>
+            <ul>{readiness.missing.map((item) => <li key={item.field}>{t(item.label)}</li>)}</ul>
           </div>
         ) : null}
       </div>
@@ -299,22 +301,22 @@ export default function OrganizationOnboarding({ draft, organization, busy, onCh
       >
         <div className="modal-heading onboarding-heading">
           <div>
-            <p className="eyebrow">Owner setup</p>
-            <h2 id="organization-onboarding-title" ref={headingRef} tabIndex="-1">Business identity</h2>
-            <p id="organization-onboarding-description">Save a reliable identity for controlled commercial documents.</p>
+            <p className="eyebrow">{t('Owner setup')}</p>
+            <h2 id="organization-onboarding-title" ref={headingRef} tabIndex="-1">{t('Business identity')}</h2>
+            <p id="organization-onboarding-description">{t('Save a reliable identity for controlled commercial documents.')}</p>
           </div>
-          <button type="button" className="icon-button" aria-label="Close business setup" disabled={busy} onClick={onClose}>
+          <button type="button" className="icon-button" aria-label={t('Close business setup')} disabled={busy} onClick={onClose}>
             <X size={18} />
           </button>
         </div>
-        <ol className="onboarding-steps" aria-label="Setup progress">
+        <ol className="onboarding-steps" aria-label={t('Setup progress')}>
           {STEPS.map((item, index) => {
             const Icon = item.icon
             const complete = index < step
             return (
               <li key={item.key} className={index === step ? 'onboarding-step-active' : complete ? 'onboarding-step-complete' : ''} aria-current={index === step ? 'step' : undefined}>
                 <span>{complete ? <Check size={14} /> : <Icon size={14} />}</span>
-                <strong>{item.label}</strong>
+                <strong>{t(item.label)}</strong>
               </li>
             )
           })}
@@ -322,16 +324,16 @@ export default function OrganizationOnboarding({ draft, organization, busy, onCh
         <form className="onboarding-form" onSubmit={saveAndContinue} aria-busy={busy}>
           <fieldset disabled={busy}>
             <div className="onboarding-step-heading">
-              <span>Step {progressLabel}</span>
-              <h3>{step === 0 ? 'Legal identity' : step === 1 ? 'Office and contact' : step === 2 ? 'Billing defaults' : 'Confirm readiness'}</h3>
+              <span>{t('Step {progress}', { progress: progressLabel })}</span>
+              <h3>{step === 0 ? t('Legal identity') : step === 1 ? t('Office and contact') : step === 2 ? t('Billing defaults') : t('Confirm readiness')}</h3>
               <p>
                 {step === 0
-                  ? 'These details identify the contracting legal entity.'
+                  ? t('These details identify the contracting legal entity.')
                   : step === 1
-                    ? 'Retain the registered office and at least one direct contact route.'
+                    ? t('Retain the registered office and at least one direct contact route.')
                     : step === 2
-                      ? 'Set document and payment defaults. Electronic invoicing details are optional but must be entered as a pair.'
-                      : 'Review the server-validated record before returning to operations.'}
+                      ? t('Set document and payment defaults. Electronic invoicing details are optional but must be entered as a pair.')
+                      : t('Review the server-validated record before returning to operations.')}
               </p>
             </div>
             {statusMessage ? <p className="onboarding-save-status" role="status"><Check size={15} /> {statusMessage}</p> : null}
@@ -339,20 +341,20 @@ export default function OrganizationOnboarding({ draft, organization, busy, onCh
             <div className="modal-actions onboarding-actions">
               {step > 0 ? (
                 <button type="button" className="secondary-button" onClick={() => { setStatusMessage(''); setStep((current) => current - 1) }}>
-                  <ArrowLeft size={16} /> Back
+                  <ArrowLeft size={16} /> {t('Back')}
                 </button>
               ) : <span />}
               {step < STEPS.length - 1 ? (
                 <button className="primary-button" disabled={!stepValid || busy}>
-                  {busy ? 'Saving...' : 'Save and continue'} <ChevronRight size={16} />
+                  {busy ? t('Saving...') : t('Save and continue')} <ChevronRight size={16} />
                 </button>
               ) : readiness.ready ? (
                 <button type="button" className="primary-button" onClick={onClose}>
-                  <Check size={16} /> Finish setup
+                  <Check size={16} /> {t('Finish setup')}
                 </button>
               ) : (
                 <button type="button" className="primary-button" onClick={() => setStep(firstMissingStep)}>
-                  Complete required details <ChevronRight size={16} />
+                  {t('Complete required details')} <ChevronRight size={16} />
                 </button>
               )}
             </div>

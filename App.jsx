@@ -4929,13 +4929,13 @@ function App() {
       if (announce) {
         notify(
           result.organization.readiness.ready
-            ? 'Business identity retained and ready for controlled commercial packages.'
-            : `Business identity retained. ${result.organization.readiness.missing.length} required item(s) remain.`,
+            ? ot('Business identity retained and ready for controlled commercial packages.')
+            : ot('Business identity retained. {count} required item(s) remain.', { count: result.organization.readiness.missing.length }),
         )
       }
       return result.organization
     } catch (requestError) {
-      setError(requestError.message)
+      setError(ot(requestError.message))
       return null
     } finally {
       setSubmitting(false)
@@ -13566,7 +13566,7 @@ function App() {
 
             {section === 'operations' && capabilities.maintenance && (
               <section className="operations-grid">
-                <LazyControlBoundary label="team access">
+                <LazyControlBoundary label={ot('team access')}>
                   <TeamAccessControl
                     request={api}
                     register={data.operatorRegister}
@@ -13575,9 +13575,10 @@ function App() {
                     onRegisterChange={(operatorRegister) => setData((current) => current ? { ...current, operatorRegister } : current)}
                     onError={setError}
                     onNotice={notify}
+                    locale={operatorLocale}
                   />
                 </LazyControlBoundary>
-                <LazyControlBoundary label="privacy requests">
+                <LazyControlBoundary label={ot('privacy requests')}>
                   <PrivacyRequestsControl
                     request={api}
                     register={data.privacyRequests}
@@ -13592,56 +13593,56 @@ function App() {
                 <section className="panel page-panel organization-profile-panel" data-testid="organization-profile-panel">
                   <div className="panel-heading">
                     <div>
-                      <h2>Business identity</h2>
-                      <p>The legal, electronic, and payment details captured in controlled quote and invoice packages.</p>
+                      <h2>{ot('Business identity')}</h2>
+                      <p>{ot('The legal, electronic, and payment details captured in controlled quote and invoice packages.')}</p>
                     </div>
                     <span className={`status ${data.organization?.readiness?.ready ? 'status-ready' : 'status-attention'}`}>
-                      {data.organization?.readiness?.ready ? 'issue ready' : 'incomplete'}
+                      {data.organization?.readiness?.ready ? ot('issue ready') : ot('incomplete')}
                     </span>
                   </div>
                   <form onSubmit={saveOrganizationProfile} aria-busy={submitting || sectionLoading}>
                     <fieldset className="form-fieldset" disabled={submitting || sectionLoading}>
                     <div className="form-grid organization-profile-form">
                       <label>
-                        Legal name
+                        {ot('Legal name')}
                         <input
                           value={organizationProfileDraft.legalName}
                           onChange={(event) => updateOrganizationProfile('legalName', event.target.value)}
                         />
                       </label>
                       <label>
-                        Trading name
+                        {ot('Trading name')}
                         <input
                           value={organizationProfileDraft.tradingName}
                           onChange={(event) => updateOrganizationProfile('tradingName', event.target.value)}
                         />
                       </label>
                       <label>
-                        Registration number
+                        {ot('Registration number')}
                         <input
                           value={organizationProfileDraft.registrationNumber}
                           onChange={(event) => updateOrganizationProfile('registrationNumber', event.target.value)}
-                          placeholder="KVK or national registry number"
+                          placeholder={ot('KVK or national registry number')}
                         />
                       </label>
                       <label>
-                        Electronic address scheme
+                        {ot('Electronic address scheme')}
                         <input
                           value={organizationProfileDraft.electronicAddressScheme}
                           onChange={(event) => updateOrganizationProfile('electronicAddressScheme', event.target.value)}
-                          placeholder="0106 for KVK"
+                          placeholder={ot('0106 for KVK')}
                         />
                       </label>
                       <label>
-                        Electronic address
+                        {ot('Electronic address')}
                         <input
                           value={organizationProfileDraft.electronicAddress}
                           onChange={(event) => updateOrganizationProfile('electronicAddress', event.target.value)}
-                          placeholder="Defaults to KVK for Dutch entities"
+                          placeholder={ot('Defaults to KVK for Dutch entities')}
                         />
                       </label>
                       <label>
-                        VAT number
+                        {ot('VAT number')}
                         <input
                           disabled={organizationProfileDraft.vatExempt}
                           value={organizationProfileDraft.vatNumber}
@@ -13654,10 +13655,10 @@ function App() {
                           checked={organizationProfileDraft.vatExempt}
                           onChange={(event) => updateOrganizationVatExemption(event.target.checked)}
                         />
-                        This legal entity is VAT exempt
+                        {ot('This legal entity is VAT exempt')}
                       </label>
                       <label>
-                        Email
+                        {ot('Email')}
                         <input
                           type="email"
                           value={organizationProfileDraft.email}
@@ -13665,14 +13666,14 @@ function App() {
                         />
                       </label>
                       <label>
-                        Phone
+                        {ot('Phone')}
                         <input
                           value={organizationProfileDraft.phone}
                           onChange={(event) => updateOrganizationProfile('phone', event.target.value)}
                         />
                       </label>
                       <label className="form-span">
-                        Website
+                        {ot('Website')}
                         <input
                           type="url"
                           value={organizationProfileDraft.website}
@@ -13681,28 +13682,28 @@ function App() {
                         />
                       </label>
                       <label className="form-span">
-                        Registered address
+                        {ot('Registered address')}
                         <input
                           value={organizationProfileDraft.address}
                           onChange={(event) => updateOrganizationProfile('address', event.target.value)}
                         />
                       </label>
                       <label>
-                        Postal code
+                        {ot('Postal code')}
                         <input
                           value={organizationProfileDraft.postalCode}
                           onChange={(event) => updateOrganizationProfile('postalCode', event.target.value)}
                         />
                       </label>
                       <label>
-                        City
+                        {ot('City')}
                         <input
                           value={organizationProfileDraft.city}
                           onChange={(event) => updateOrganizationProfile('city', event.target.value)}
                         />
                       </label>
                       <label>
-                        Country code
+                        {ot('Country code')}
                         <input
                           required
                           maxLength="2"
@@ -13725,7 +13726,7 @@ function App() {
                         />
                       </label>
                       <label>
-                        Payment terms (days)
+                        {ot('Payment terms (days)')}
                         <input
                           required
                           type="number"
@@ -13736,7 +13737,7 @@ function App() {
                         />
                       </label>
                       <label>
-                        Quote validity default (days)
+                        {ot('Quote validity default (days)')}
                         <input
                           required
                           type="number"
@@ -13747,15 +13748,15 @@ function App() {
                         />
                       </label>
                       <label className="form-span">
-                        Quote terms
+                        {ot('Quote terms')}
                         <textarea
                           value={organizationProfileDraft.quoteTerms}
                           onChange={(event) => updateOrganizationProfile('quoteTerms', event.target.value)}
-                          placeholder="Commercial terms shown on every new issue package."
+                          placeholder={ot('Commercial terms shown on every new issue package.')}
                         />
                       </label>
                       <label className="form-span">
-                        Internal notes
+                        {ot('Internal notes')}
                         <textarea
                           value={organizationProfileDraft.notes}
                           onChange={(event) => updateOrganizationProfile('notes', event.target.value)}
@@ -13765,18 +13766,18 @@ function App() {
                     {data.organization?.readiness?.missing?.length ? (
                       <p className="organization-profile-missing">
                         <TriangleAlert size={15} />
-                        Required before quote issue: {data.organization.readiness.missing.map((item) => item.label).join(', ')}.
+                        {ot('Required before quote issue: {fields}.', { fields: data.organization.readiness.missing.map((item) => ot(item.label)).join(', ') })}
                       </p>
                     ) : (
                       <p className="organization-profile-ready">
                         <ShieldCheck size={15} />
-                        Identity is ready. Each package still requires an internally approved quote and a separate delivery approval.
+                        {ot('Identity is ready. Each package still requires an internally approved quote and a separate delivery approval.')}
                       </p>
                     )}
                     <div className="modal-actions">
                       <button className="primary-button" disabled={submitting}>
                         <Building2 size={16} />
-                        {sectionLoading ? 'Loading identity...' : submitting ? 'Saving...' : 'Save business identity'}
+                        {sectionLoading ? ot('Loading identity...') : submitting ? ot('Saving...') : ot('Save business identity')}
                       </button>
                     </div>
                     </fieldset>
@@ -13805,17 +13806,17 @@ function App() {
                 <section className={`panel page-panel automation-safety-panel ${automationSuspended ? 'automation-safety-panel-active' : ''}`} data-testid="automation-safety-control">
                   <div className="panel-heading">
                     <div>
-                      <h2>Autonomous-work safety stop</h2>
-                      <p>Owner control for manual command plans and the durable scheduler.</p>
+                      <h2>{ot('Autonomous-work safety stop')}</h2>
+                      <p>{ot('Owner control for manual command plans and the durable scheduler.')}</p>
                     </div>
                     <span className={`status ${automationSuspended ? 'status-attention' : 'status-ready'}`}>
-                      {automationSuspended ? 'suspended' : 'active'}
+                      {automationSuspended ? ot('suspended') : ot('active')}
                     </span>
                   </div>
                   <p className="panel-copy">
                     {automationSuspended
-                      ? `${automationControl.reason} Direct operator entries, evidence, and approvals are unaffected.`
-                      : 'Autonomous work can create internal drafts and review tasks only. External commitments remain approval-gated.'}
+                      ? ot('{reason} Direct operator entries, evidence, and approvals are unaffected.', { reason: automationControl.reason })
+                      : ot('Autonomous work can create internal drafts and review tasks only. External commitments remain approval-gated.')}
                   </p>
                   <div className="operations-actions">
                     <button
@@ -13824,16 +13825,15 @@ function App() {
                       onClick={(event) => openAutomationControlDialog(!automationSuspended, event.currentTarget)}
                     >
                       {automationSuspended ? <Activity size={16} /> : <Ban size={16} />}
-                      {automationSuspended ? 'Resume autonomous drafting' : 'Suspend autonomous drafting'}
+                      {automationSuspended ? ot('Resume autonomous drafting') : ot('Suspend autonomous drafting')}
                     </button>
                     <a className="secondary-button" href="/api/operations/support-bundle" download>
                       <FileDown size={16} />
-                      Download support bundle
+                      {ot('Download support bundle')}
                     </a>
                   </div>
                   <p className="panel-copy">
-                    The support bundle contains runtime, migration, aggregate-count, integrity, and control diagnostics only. It excludes
-                    customer records, evidence, logs, environment values, and credentials.
+                    {ot('The support bundle contains runtime, migration, aggregate-count, integrity, and control diagnostics only. It excludes customer records, evidence, logs, environment values, and credentials.')}
                   </p>
                 </section>
                 <section className="panel page-panel">
@@ -14013,12 +14013,12 @@ function App() {
                       className="danger-button"
                       disabled={submitting || !localBackupAvailable}
                       title={
-                        localBackupAvailable ? 'Archive QA records after backup' : 'Hosted maintenance requires a provider recovery point'
+                        localBackupAvailable ? ot('Archive QA records after backup') : ot('Hosted maintenance requires a provider recovery point')
                       }
                       onClick={(event) => openQaResetDialog(event.currentTarget)}
                     >
                       <Archive size={16} />
-                      Archive QA records
+                      {ot('Archive QA records')}
                     </button>
                   </div>
                   <p className="panel-copy">
@@ -14127,7 +14127,7 @@ function App() {
       </main>
 
       {showOrganizationOnboarding ? (
-        <Suspense fallback={<div className="modal-backdrop" role="status"><div className="loading"><LoaderCircle className="spin" size={20} /> Loading business setup</div></div>}>
+        <Suspense fallback={<div className="modal-backdrop" role="status"><div className="loading"><LoaderCircle className="spin" size={20} /> {ot('Loading business setup')}</div></div>}>
           <OrganizationOnboarding
             draft={organizationProfileDraft}
             organization={data?.organization}
@@ -14136,6 +14136,7 @@ function App() {
             onVatExemptChange={updateOrganizationVatExemption}
             onSave={() => persistOrganizationProfile({ announce: false })}
             onClose={closeOrganizationOnboarding}
+            locale={operatorLocale}
           />
         </Suspense>
       ) : null}
@@ -16624,7 +16625,7 @@ function App() {
                     <input
                       required
                       maxLength="80"
-                      pattern="[A-Za-z0-9][A-Za-z0-9-]{0,11}(\.[A-Za-z0-9][A-Za-z0-9-]{0,11}){0,7}"
+                      pattern="[A-Za-z0-9][A-Za-z0-9\-]{0,11}(\.[A-Za-z0-9][A-Za-z0-9\-]{0,11}){0,7}"
                       title={ot('Use one to eight dot-separated work-breakdown segments, for example 01.20.')}
                       value={takeoffItemDraft.wbsCode}
                       onChange={(event) => setTakeoffItemDraft({ ...takeoffItemDraft, wbsCode: event.target.value })}
@@ -19855,6 +19856,7 @@ function App() {
             error={automationControlError}
             onClose={closeAutomationControlDialog}
             onSubmit={changeAutomationControl}
+            locale={operatorLocale}
           />
         </Suspense>
       ) : null}
@@ -19868,6 +19870,7 @@ function App() {
             onClose={closeQaResetDialog}
             onReload={loadQaResetPreview}
             onSubmit={resetQa}
+            locale={operatorLocale}
           />
         </Suspense>
       ) : null}

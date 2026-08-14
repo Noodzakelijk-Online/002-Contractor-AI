@@ -3705,7 +3705,7 @@ function InspectionChecklistControl({
         <form className="inspection-template-editor" data-testid="inspection-template-form" onSubmit={submitTemplate}>
           <div className="form-grid compact-form">
             <label>{t('Template name')}<input autoFocus required minLength="3" maxLength="160" value={templateDraft.name} onChange={(event) => setTemplateDraft({ ...templateDraft, name: event.target.value })} /></label>
-            <label>{t('Template key')}<input required pattern="[A-Za-z0-9_ -]+" value={templateDraft.templateKey} onChange={(event) => setTemplateDraft({ ...templateDraft, templateKey: event.target.value })} placeholder="facade_quality" /></label>
+            <label>{t('Template key')}<input required pattern="[A-Za-z0-9_ \-]+" value={templateDraft.templateKey} onChange={(event) => setTemplateDraft({ ...templateDraft, templateKey: event.target.value })} placeholder="facade_quality" /></label>
             <label>{t('Type')}<input required value={templateDraft.inspectionType} onChange={(event) => setTemplateDraft({ ...templateDraft, inspectionType: event.target.value })} /></label>
             <label>{t('Discipline')}<select value={templateDraft.discipline} onChange={(event) => setTemplateDraft({ ...templateDraft, discipline: event.target.value })}><option value="quality">{t('Quality')}</option><option value="safety">{t('Safety')}</option><option value="closeout">{t('Closeout')}</option><option value="general">{t('General')}</option></select></label>
             <label className="checkbox-label form-span"><input type="checkbox" checked={templateDraft.installationQc} onChange={(event) => setTemplateDraft({

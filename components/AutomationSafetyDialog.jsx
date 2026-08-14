@@ -1,14 +1,16 @@
 import { useEffect, useRef, useState } from 'react'
 import { Activity, Ban, ShieldCheck, TriangleAlert, X } from 'lucide-react'
+import { operatorText } from '../operator-locale'
 import './AutomationSafetyDialog.css'
 
-export default function AutomationSafetyDialog({ suspend, control, busy, error, onClose, onSubmit }) {
+export default function AutomationSafetyDialog({ suspend, control, busy, error, onClose, onSubmit, locale = 'en-GB' }) {
+  const t = (key, variables) => operatorText(locale, key, variables)
   const [reason, setReason] = useState('')
   const [confirmed, setConfirmed] = useState(false)
   const [validationError, setValidationError] = useState('')
   const dialogRef = useRef(null)
   const headingRef = useRef(null)
-  const title = suspend ? 'Suspend autonomous drafting' : 'Resume autonomous drafting'
+  const title = suspend ? t('Suspend autonomous drafting') : t('Resume autonomous drafting')
 
   useEffect(() => {
     headingRef.current?.focus()
@@ -43,11 +45,11 @@ export default function AutomationSafetyDialog({ suspend, control, busy, error, 
     event.preventDefault()
     const trimmedReason = reason.trim()
     if (trimmedReason.length < 8) {
-      setValidationError('Record at least 8 characters explaining this operational control decision.')
+      setValidationError(t('Record at least 8 characters explaining this operational control decision.'))
       return
     }
     if (!confirmed) {
-      setValidationError('Confirm that you understand the effect of this decision.')
+      setValidationError(t('Confirm that you understand the effect of this decision.'))
       return
     }
     setValidationError('')
@@ -71,29 +73,29 @@ export default function AutomationSafetyDialog({ suspend, control, busy, error, 
       >
         <div className="modal-heading automation-control-heading">
           <div>
-            <p className="eyebrow">Owner safety control</p>
+            <p className="eyebrow">{t('Owner safety control')}</p>
             <h2 id="automation-control-title" ref={headingRef} tabIndex="-1">
               {title}
             </h2>
             <p id="automation-control-description">
               {suspend
-                ? 'Stop manual command plans and scheduled autonomous drafting without interrupting direct operator work.'
-                : 'Restore internal drafting only after reviewing the current operating-ledger state.'}
+                ? t('Stop manual command plans and scheduled autonomous drafting without interrupting direct operator work.')
+                : t('Restore internal drafting only after reviewing the current operating-ledger state.')}
             </p>
           </div>
-          <button type="button" className="icon-button" aria-label={`Close ${title.toLowerCase()} dialog`} disabled={busy} onClick={onClose}>
+          <button type="button" className="icon-button" aria-label={t('Close {title} dialog', { title: title.toLocaleLowerCase(locale) })} disabled={busy} onClick={onClose}>
             <X size={18} />
           </button>
         </div>
 
         <div className="automation-control-body">
-          <div className="automation-control-context" aria-label="Current automation control">
+          <div className="automation-control-context" aria-label={t('Current automation control')}>
             <div>
-              <span>Current status</span>
-              <strong>{control?.suspended ? 'Suspended' : 'Active'}</strong>
+              <span>{t('Current status')}</span>
+              <strong>{control?.suspended ? t('Suspended') : t('Active')}</strong>
             </div>
             <div>
-              <span>Control revision</span>
+              <span>{t('Control revision')}</span>
               <strong>{control?.revision ?? 0}</strong>
             </div>
           </div>
@@ -102,14 +104,14 @@ export default function AutomationSafetyDialog({ suspend, control, busy, error, 
             <div className="automation-control-current-reason">
               <ShieldCheck size={17} aria-hidden="true" />
               <p>
-                <strong>Retained reason</strong>
+                <strong>{t('Retained reason')}</strong>
                 <span>{control.reason}</span>
               </p>
             </div>
           ) : null}
 
           <label className="automation-control-reason">
-            Decision reason
+            {t('Decision reason')}
             <textarea
               required
               minLength="8"
@@ -122,11 +124,11 @@ export default function AutomationSafetyDialog({ suspend, control, busy, error, 
               }}
               placeholder={
                 suspend
-                  ? 'Describe the risk, incident, or operating condition requiring the safety stop.'
-                  : 'Describe the checks completed and why internal drafting can safely resume.'
+                  ? t('Describe the risk, incident, or operating condition requiring the safety stop.')
+                  : t('Describe the checks completed and why internal drafting can safely resume.')
               }
             />
-            <small>{reason.trim().length}/500 characters; at least 8 required.</small>
+            <small>{t('{count}/500 characters; at least 8 required.', { count: reason.trim().length })}</small>
           </label>
 
           <label className="automation-control-confirmation">
@@ -140,13 +142,13 @@ export default function AutomationSafetyDialog({ suspend, control, busy, error, 
             />
             <span>
               {suspend
-                ? 'I understand this stops manual and scheduled autonomous drafting.'
-                : 'I verified the retained reason and current ledger readiness before resuming.'}
+                ? t('I understand this stops manual and scheduled autonomous drafting.')
+                : t('I verified the retained reason and current ledger readiness before resuming.')}
             </span>
           </label>
 
           <p className="workflow-note automation-control-boundary">
-            External communication, supplier spend, schedule commitments, and finance actions remain approval-gated regardless of this setting.
+            {t('External communication, supplier spend, schedule commitments, and finance actions remain approval-gated regardless of this setting.')}
           </p>
 
           {decisionError ? (
@@ -159,11 +161,11 @@ export default function AutomationSafetyDialog({ suspend, control, busy, error, 
 
         <div className="modal-actions automation-control-actions">
           <button type="button" className="secondary-button" disabled={busy} onClick={onClose}>
-            Cancel
+            {t('Cancel')}
           </button>
           <button className={suspend ? 'danger-button' : 'primary-button'} disabled={submitDisabled}>
             {suspend ? <Ban size={16} /> : <Activity size={16} />}
-            {busy ? 'Recording decision...' : title}
+            {busy ? t('Recording decision...') : title}
           </button>
         </div>
       </form>

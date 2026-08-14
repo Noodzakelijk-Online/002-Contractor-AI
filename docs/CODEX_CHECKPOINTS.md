@@ -3,6 +3,21 @@
 This file is a compact resume boundary. A future implementation pass should verify
 the repository rather than treating these statements as current by assumption.
 
+## CP-24 Bilingual owner administration and safety controls
+
+- Business onboarding and identity, managed local team access, autonomous safety
+  suspend/resume, and QA archive maintenance now share the persisted NL/EN locale.
+- Canonical roles, account statuses, safety reasons, `ARCHIVE QA` confirmation,
+  retained organization values, and one-time access-key secrecy remain unchanged.
+- Browser QA covers Dutch mobile onboarding through exact API persistence, account
+  create/rotate/deactivate, safety control, QA preview, English round trip, mobile
+  containment, empty error logs, and axe. It found and closed three invalid HTML
+  validation patterns and three low-contrast interface defects.
+- Verification: 3,329 unique specialist translation keys with zero duplicates;
+  10 frontend tests, 535 Node tests, 99 Chromium workflows in 25 isolated batches,
+  release/HAI/lint/build/bundle, production benchmark, hardened container, and
+  Node 22.23.2 Windows standalone gates pass.
+
 ## CP-23 Bilingual equipment lifecycle and physical custody
 
 - Equipment registration, controlled statuses, office/field handoff, return and

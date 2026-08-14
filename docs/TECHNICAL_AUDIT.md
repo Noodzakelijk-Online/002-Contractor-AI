@@ -127,6 +127,13 @@ external-provider engines.
     translating retained names, scope, rationale, or evidence. The end-to-end Dutch
     flow proves approval and provider-receipt boundaries, reload persistence,
     English round trip, mobile containment, and axe-clean procurement contrast.
+19. Parent owner-administration surfaces remained English-only and three form
+    patterns were invalid under current Chromium Unicode-set rules. Business
+    onboarding/identity, managed team access, autonomous safety, and QA archive
+    maintenance now follow the retained locale without changing canonical roles,
+    statuses, reasons, confirmation phrases, organization evidence, or access-key
+    secrecy. The production-browser journey also closed three metadata/step-label
+    contrast defects and proves exact API evidence through an English round trip.
 
 ### Residual technical debt
 
@@ -142,11 +149,11 @@ external-provider engines.
 5. Per-principal operator language and token-scoped client-portal language are
    retained in the ledger. The shell, client portal, Performance Scorecard, and
    Framework Register are bilingual and formatting follows the selected locale.
-   Job setup coverage, critical-path work planning, NCR, field risk, field
-   assurance, tender comparison, purchasing, job-costing, cost-code review,
+   Owner onboarding/identity, managed team access, autonomous safety, QA archive
+   maintenance, job setup coverage, critical-path work planning, NCR, field risk,
+   field assurance, tender comparison, purchasing, job-costing, cost-code review,
    cost-to-complete, and finance-readiness controls are also bilingual, but the
-   remaining specialist operator workspace
-   copy is not yet fully translated.
+   remaining specialist operator workspace copy is not yet fully translated.
 6. Legal retention periods and data-subject erasure decisions remain operator and
    counsel responsibilities. The application archives and exports; it does not
    silently delete immutable commercial or audit evidence.

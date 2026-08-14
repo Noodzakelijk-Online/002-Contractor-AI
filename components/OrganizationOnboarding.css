@@ -13,7 +13,7 @@
 .onboarding-steps .onboarding-step-complete > span { color: #fff; background: #4d8a76; }
 .onboarding-form fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
 .onboarding-step-heading { padding: 18px 22px 4px; }
-.onboarding-step-heading > span { color: #72817b; font-size: 10px; font-weight: 750; text-transform: uppercase; }
+.onboarding-step-heading > span { color: #56665f; font-size: 10px; font-weight: 750; text-transform: uppercase; }
 .onboarding-step-heading h3 { margin: 5px 0 3px; color: #23372f; font-size: 16px; }
 .onboarding-step-heading p { margin: 0; color: #67766f; font-size: 12px; line-height: 1.45; }
 .onboarding-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; padding: 16px 22px 20px; }

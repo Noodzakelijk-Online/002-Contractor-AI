@@ -91,14 +91,16 @@ or operations APIs and expose explicit loading, disabled, empty, and error state
 
 - The operator shell and complete client portal provide persisted NL/EN switching;
   dates, numbers, and EUR values follow the selected locale. The practical-core
-  field assurance, safety, quality, planning, commercial, and closeout chains are
-  bilingual, but some specialist operator workspaces still contain English-only
-  copy, so application-wide translation remains incomplete.
+  field assurance, safety, quality, planning, commercial, and closeout chains plus
+  owner onboarding/identity, managed team access, autonomous safety, and QA archive
+  maintenance are bilingual. Some specialist operator workspaces still contain
+  English-only copy, so application-wide translation remains incomplete.
 - General draft autosave is not universal. Field offline capture has a dedicated
   queue; broad silent local caching would need privacy and conflict design.
 - Large lists do not all offer the same advanced filters and pagination.
-- Team/role settings are environment-administered in production instead of being a
-  full identity-provider and invitation UI.
+- Named local operator creation, key rotation, deactivation, and scoped access are
+  owner-administered and bilingual. External identity-provider and invitation
+  provisioning are not configured.
 
 These gaps do not create fake product actions; they are tracked as partial phases
 in `GOAL_COMPLETION_MATRIX.md`.
