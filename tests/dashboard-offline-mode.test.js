@@ -39,8 +39,10 @@ test('large navigation and job controls are loaded through local suspense bounda
   assert.match(dashboardRootSource, /<LazyControlBoundary label="audit history">/);
   assert.match(dashboardRootSource, /<ResourcesWorkspace[\s\S]*locale=\{operatorLocale\}/);
   assert.match(dashboardRootSource, /<AuditHistory locale=\{operatorLocale\}/);
+  assert.match(dashboardRootSource, /<ProjectControls[\s\S]*locale=\{operatorLocale\}/);
   assert.match(dashboardSource, /function ResourcesWorkspace\(\{[\s\S]*locale = 'en-GB'/);
   assert.match(dashboardSource, /function AuditHistory\(\{ locale = 'en-GB'/);
+  assert.match(dashboardSource, /function ProjectControls\(\{[\s\S]*locale = 'en-GB'/);
   assert.match(dashboardRootSource, /<LazyControlBoundary label="client controls">/);
   assert.match(dashboardRootSource, /<LazyControlBoundary label="automation controls">/);
   assert.match(dashboardRootSource, /<LazyControlBoundary label=\{ot\('job controls'\)\} mode="job">/);

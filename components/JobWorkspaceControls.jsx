@@ -69,6 +69,34 @@ const FIELD_ASSURANCE_REVIEW_PRIORITY = [
   'complete_orientation',
 ]
 
+const PROJECT_CONTROL_VALUE_LABELS = Object.freeze({
+  general: 'General',
+  architectural: 'Architectural',
+  structural: 'Structural',
+  mechanical: 'Mechanical',
+  electrical: 'Electrical',
+  civil: 'Civil',
+  construction: 'For construction',
+  review: 'For review',
+  coordination: 'Coordination',
+  record: 'Record / as-built',
+  for_information: 'For information',
+  for_review: 'For review',
+  for_approval: 'For approval',
+  for_construction: 'For construction',
+  as_built: 'As built',
+  progress: 'Progress',
+  design: 'Design',
+  client: 'Client',
+  commercial: 'Commercial',
+  handover: 'Handover',
+  kickoff: 'Kickoff',
+  low: 'Low',
+  medium: 'Medium',
+  high: 'High',
+  critical: 'Critical',
+})
+
 function emptyNonconformanceDraft(operatorName = '') {
   return {
     entryKey: createFieldEvidenceDraftId(),
@@ -2860,6 +2888,7 @@ function ClientSuccessWorkspace({
 
 function ProjectControls({
   job,
+  locale = 'en-GB',
   canCoordinate,
   canApprove,
   submitting,
@@ -2873,6 +2902,7 @@ function ProjectControls({
   onCreateMeetingFollowUp,
   onOpenApprovals,
 }) {
+  const t = (key, variables = {}) => operatorText(locale, key, variables)
   const [view, setView] = useState('rfi')
   const [creating, setCreating] = useState(false)
   const [rfiDraft, setRfiDraft] = useState(emptyRfiDraft)
@@ -2881,6 +2911,7 @@ function ProjectControls({
   const [transmittalDraft, setTransmittalDraft] = useState(emptyTransmittalDraft)
   const [meetingDraft, setMeetingDraft] = useState(emptyProjectMeetingDraft)
   const [review, setReview] = useState(emptyProjectControlReview)
+  const formatControlValue = (value) => t(PROJECT_CONTROL_VALUE_LABELS[value] || formatStatus(value))
   const rfis = job.rfis || EMPTY_LIST
   const submittals = job.submittals || EMPTY_LIST
   const documents = (job.documents || EMPTY_LIST).filter((document) => document.type === 'controlled_document')
@@ -3007,19 +3038,19 @@ function ProjectControls({
       record,
       status,
       notes: type === 'submittal' && status === 'submitted'
-        ? 'Package retained and ready for technical review.'
+        ? t('Package retained and ready for technical review.')
         : type === 'transmittal_issue'
-          ? 'Delivery was performed outside Contractor.AI and the retained reference identifies the real issue evidence.'
+          ? t('Delivery was performed outside Contractor.AI and the retained reference identifies the real issue evidence.')
           : type === 'transmittal_ack'
-            ? 'Recipient acknowledgment evidence reviewed and retained.'
+            ? t('Recipient acknowledgment evidence reviewed and retained.')
             : type === 'meeting_submit'
-              ? 'Agenda, attendance, decisions, and assigned actions reviewed for approval.'
+              ? t('Agenda, attendance, decisions, and assigned actions reviewed for approval.')
               : type === 'meeting_issue'
-                ? 'Distribution was performed outside Contractor.AI and this reference identifies the retained delivery evidence.'
+                ? t('Distribution was performed outside Contractor.AI and this reference identifies the retained delivery evidence.')
                 : type === 'meeting_action'
-                  ? 'Completion evidence reviewed against the assigned meeting action and linked task.'
+                  ? t('Completion evidence reviewed against the assigned meeting action and linked task.')
                   : type === 'meeting_followup'
-                    ? 'Review unresolved actions and retain the next coordination date.'
+                    ? t('Review unresolved actions and retain the next coordination date.')
             : '',
       reference: '',
       receiptId: type === 'transmittal_ack' ? context?.id || '' : '',
@@ -3030,7 +3061,7 @@ function ProjectControls({
     })
   }
 
-  const reviewLabel = review.type === 'rfi'
+  const reviewLabel = t(review.type === 'rfi'
     ? 'Request answer approval'
     : review.type === 'document'
       ? 'Request revision approval'
@@ -3048,15 +3079,15 @@ function ProjectControls({
                   ? 'Create follow-up'
       : review.status === 'submitted'
         ? 'Mark submitted'
-        : 'Request submittal approval'
+        : 'Request submittal approval')
 
   return (
     <section className="job-workspace-section project-controls" data-testid="project-controls">
       <div className="section-heading project-controls-heading">
         <ClipboardList size={18} />
         <div>
-          <h3>Project controls</h3>
-          <p>Control design questions, reviews, current revisions, distribution, meeting decisions, and assigned actions.</p>
+          <h3>{t('Project controls')}</h3>
+          <p>{t('Control design questions, reviews, current revisions, distribution, meeting decisions, and assigned actions.')}</p>
         </div>
         {canCoordinate ? (
           <button
@@ -3070,18 +3101,18 @@ function ProjectControls({
             }}
           >
             <Plus size={15} />
-            New {view === 'rfi' ? 'RFI' : view === 'submittal' ? 'submittal' : view === 'document' ? 'revision' : view === 'transmittal' ? 'transmittal' : 'meeting'}
+            {t('New {record}', { record: t(view === 'rfi' ? 'RFI' : view === 'submittal' ? 'submittal' : view === 'document' ? 'revision' : view === 'transmittal' ? 'transmittal' : 'meeting') })}
           </button>
         ) : null}
       </div>
-      <div className="project-control-metrics" aria-label="Project control status">
-        <div><span>Open RFIs</span><strong>{activeRfis}</strong></div>
-        <div><span>Submittal queue</span><strong>{activeSubmittals}</strong></div>
-        <div><span>Current revisions</span><strong>{currentDocuments}</strong></div>
-        <div><span>Receipt queue</span><strong>{pendingTransmittalReceipts}</strong></div>
-        <div><span>Open meeting actions</span><strong>{openMeetingActions}</strong></div>
+      <div className="project-control-metrics" aria-label={t('Project control status')}>
+        <div><span>{t('Open RFIs')}</span><strong>{activeRfis}</strong></div>
+        <div><span>{t('Submittal queue')}</span><strong>{activeSubmittals}</strong></div>
+        <div><span>{t('Current revisions')}</span><strong>{currentDocuments}</strong></div>
+        <div><span>{t('Receipt queue')}</span><strong>{pendingTransmittalReceipts}</strong></div>
+        <div><span>{t('Open meeting actions')}</span><strong>{openMeetingActions}</strong></div>
       </div>
-      <div className="segmented-control project-control-tabs" role="tablist" aria-label="Project control register">
+      <div className="segmented-control project-control-tabs" role="tablist" aria-label={t('Project control register')}>
         {[
           ['rfi', 'RFIs', rfis.length],
           ['submittal', 'Submittals', submittals.length],
@@ -3097,52 +3128,52 @@ function ProjectControls({
             key={key}
             onClick={() => selectView(key)}
           >
-            {label}<span>{count}</span>
+            {t(label)}<span>{count}</span>
           </button>
         ))}
       </div>
       {creating && view === 'rfi' ? (
         <form className="project-control-form form-grid compact-form" data-testid="create-rfi-form" onSubmit={submitCreate}>
-          <label className="form-span">RFI subject<input required minLength="2" value={rfiDraft.title} onChange={(event) => setRfiDraft({ ...rfiDraft, title: event.target.value })} placeholder="Decision needed before work continues" /></label>
-          <label className="form-span">Question<textarea required minLength="4" value={rfiDraft.question} onChange={(event) => setRfiDraft({ ...rfiDraft, question: event.target.value })} placeholder="State the condition, requested decision, and affected work." /></label>
-          <label>Responsible<input value={rfiDraft.responsible} onChange={(event) => setRfiDraft({ ...rfiDraft, responsible: event.target.value })} placeholder="Designer, client, or project lead" /></label>
-          <label>Discipline<select value={rfiDraft.discipline} onChange={(event) => setRfiDraft({ ...rfiDraft, discipline: event.target.value })}><option value="general">General</option><option value="architectural">Architectural</option><option value="structural">Structural</option><option value="mechanical">Mechanical</option><option value="electrical">Electrical</option><option value="civil">Civil</option></select></label>
-          <label>Response due<input required type="date" value={rfiDraft.dueAt} onChange={(event) => setRfiDraft({ ...rfiDraft, dueAt: event.target.value })} /></label>
-          <div className="form-actions form-span"><button className="primary-button" disabled={submitting}><Plus size={15} />Retain RFI</button><button type="button" className="secondary-button" onClick={() => setCreating(false)}>Cancel</button></div>
+          <label className="form-span">{t('RFI subject')}<input required minLength="2" value={rfiDraft.title} onChange={(event) => setRfiDraft({ ...rfiDraft, title: event.target.value })} placeholder={t('Decision needed before work continues')} /></label>
+          <label className="form-span">{t('Question')}<textarea required minLength="4" value={rfiDraft.question} onChange={(event) => setRfiDraft({ ...rfiDraft, question: event.target.value })} placeholder={t('State the condition, requested decision, and affected work.')} /></label>
+          <label>{t('Responsible')}<input value={rfiDraft.responsible} onChange={(event) => setRfiDraft({ ...rfiDraft, responsible: event.target.value })} placeholder={t('Designer, client, or project lead')} /></label>
+          <label>{t('Discipline')}<select value={rfiDraft.discipline} onChange={(event) => setRfiDraft({ ...rfiDraft, discipline: event.target.value })}><option value="general">{t('General')}</option><option value="architectural">{t('Architectural')}</option><option value="structural">{t('Structural')}</option><option value="mechanical">{t('Mechanical')}</option><option value="electrical">{t('Electrical')}</option><option value="civil">{t('Civil')}</option></select></label>
+          <label>{t('Response due')}<input required type="date" value={rfiDraft.dueAt} onChange={(event) => setRfiDraft({ ...rfiDraft, dueAt: event.target.value })} /></label>
+          <div className="form-actions form-span"><button className="primary-button" disabled={submitting}><Plus size={15} />{t('Retain RFI')}</button><button type="button" className="secondary-button" onClick={() => setCreating(false)}>{t('Cancel')}</button></div>
         </form>
       ) : null}
       {creating && view === 'submittal' ? (
         <form className="project-control-form form-grid compact-form" data-testid="create-submittal-form" onSubmit={submitCreate}>
-          <label className="form-span">Submittal title<input required minLength="2" value={submittalDraft.title} onChange={(event) => setSubmittalDraft({ ...submittalDraft, title: event.target.value })} placeholder="Product data, sample, or shop drawing package" /></label>
-          <label>Package / spec section<input value={submittalDraft.packageName} onChange={(event) => setSubmittalDraft({ ...submittalDraft, packageName: event.target.value })} placeholder="09 91 00 / finishes" /></label>
-          <label>Material<input value={submittalDraft.material} onChange={(event) => setSubmittalDraft({ ...submittalDraft, material: event.target.value })} placeholder="Retained material name" /></label>
-          <label>Responsible<input value={submittalDraft.responsible} onChange={(event) => setSubmittalDraft({ ...submittalDraft, responsible: event.target.value })} placeholder="Supplier or project team" /></label>
-          <label>Reviewer<input value={submittalDraft.reviewer} onChange={(event) => setSubmittalDraft({ ...submittalDraft, reviewer: event.target.value })} placeholder="Technical reviewer" /></label>
-          <label>Decision due<input required type="date" value={submittalDraft.dueAt} onChange={(event) => setSubmittalDraft({ ...submittalDraft, dueAt: event.target.value })} /></label>
-          <label className="form-span">Attachment references<input value={submittalDraft.attachments} onChange={(event) => setSubmittalDraft({ ...submittalDraft, attachments: event.target.value })} placeholder="Comma-separated retained document references" /></label>
-          <div className="form-actions form-span"><button className="primary-button" disabled={submitting}><Plus size={15} />Retain submittal</button><button type="button" className="secondary-button" onClick={() => setCreating(false)}>Cancel</button></div>
+          <label className="form-span">{t('Submittal title')}<input required minLength="2" value={submittalDraft.title} onChange={(event) => setSubmittalDraft({ ...submittalDraft, title: event.target.value })} placeholder={t('Product data, sample, or shop drawing package')} /></label>
+          <label>{t('Package / spec section')}<input value={submittalDraft.packageName} onChange={(event) => setSubmittalDraft({ ...submittalDraft, packageName: event.target.value })} placeholder={t('09 91 00 / finishes')} /></label>
+          <label>{t('Material')}<input value={submittalDraft.material} onChange={(event) => setSubmittalDraft({ ...submittalDraft, material: event.target.value })} placeholder={t('Retained material name')} /></label>
+          <label>{t('Responsible')}<input value={submittalDraft.responsible} onChange={(event) => setSubmittalDraft({ ...submittalDraft, responsible: event.target.value })} placeholder={t('Supplier or project team')} /></label>
+          <label>{t('Reviewer')}<input value={submittalDraft.reviewer} onChange={(event) => setSubmittalDraft({ ...submittalDraft, reviewer: event.target.value })} placeholder={t('Technical reviewer')} /></label>
+          <label>{t('Decision due')}<input required type="date" value={submittalDraft.dueAt} onChange={(event) => setSubmittalDraft({ ...submittalDraft, dueAt: event.target.value })} /></label>
+          <label className="form-span">{t('Attachment references')}<input value={submittalDraft.attachments} onChange={(event) => setSubmittalDraft({ ...submittalDraft, attachments: event.target.value })} placeholder={t('Comma-separated retained document references')} /></label>
+          <div className="form-actions form-span"><button className="primary-button" disabled={submitting}><Plus size={15} />{t('Retain submittal')}</button><button type="button" className="secondary-button" onClick={() => setCreating(false)}>{t('Cancel')}</button></div>
         </form>
       ) : null}
       {creating && view === 'document' ? (
         <form className="project-control-form form-grid compact-form" data-testid="create-controlled-document-form" onSubmit={submitCreate}>
-          <label className="form-span">Document title<input required minLength="2" value={documentDraft.title} onChange={(event) => setDocumentDraft({ ...documentDraft, title: event.target.value })} placeholder="Construction floor plan" /></label>
-          <label>Document number<input required minLength="2" value={documentDraft.documentNumber} onChange={(event) => setDocumentDraft({ ...documentDraft, documentNumber: event.target.value })} placeholder="A-101" /></label>
-          <label>Revision<input required value={documentDraft.revision} onChange={(event) => setDocumentDraft({ ...documentDraft, revision: event.target.value })} placeholder="P01" /></label>
-          <label>Discipline<select value={documentDraft.discipline} onChange={(event) => setDocumentDraft({ ...documentDraft, discipline: event.target.value })}><option value="general">General</option><option value="architectural">Architectural</option><option value="structural">Structural</option><option value="mechanical">Mechanical</option><option value="electrical">Electrical</option><option value="civil">Civil</option></select></label>
-          <label>Purpose<select value={documentDraft.purpose} onChange={(event) => setDocumentDraft({ ...documentDraft, purpose: event.target.value })}><option value="construction">For construction</option><option value="review">For review</option><option value="coordination">For coordination</option><option value="record">Record / as-built</option></select></label>
-          <label className="form-span">Retained file or source reference<input required minLength="3" value={documentDraft.sourceReference} onChange={(event) => setDocumentDraft({ ...documentDraft, sourceReference: event.target.value })} placeholder="Private storage object, evidence ID, or controlled source reference" /></label>
-          <label className="form-span">Revision reason<input value={documentDraft.revisionReason} onChange={(event) => setDocumentDraft({ ...documentDraft, revisionReason: event.target.value })} placeholder="Required when this document number already has a revision" /></label>
-          <div className="form-actions form-span"><button className="primary-button" disabled={submitting}><Plus size={15} />Retain revision</button><button type="button" className="secondary-button" onClick={() => setCreating(false)}>Cancel</button></div>
+          <label className="form-span">{t('Document title')}<input required minLength="2" value={documentDraft.title} onChange={(event) => setDocumentDraft({ ...documentDraft, title: event.target.value })} placeholder={t('Construction floor plan')} /></label>
+          <label>{t('Document number')}<input required minLength="2" value={documentDraft.documentNumber} onChange={(event) => setDocumentDraft({ ...documentDraft, documentNumber: event.target.value })} placeholder="A-101" /></label>
+          <label>{t('Revision')}<input required value={documentDraft.revision} onChange={(event) => setDocumentDraft({ ...documentDraft, revision: event.target.value })} placeholder="P01" /></label>
+          <label>{t('Discipline')}<select value={documentDraft.discipline} onChange={(event) => setDocumentDraft({ ...documentDraft, discipline: event.target.value })}><option value="general">{t('General')}</option><option value="architectural">{t('Architectural')}</option><option value="structural">{t('Structural')}</option><option value="mechanical">{t('Mechanical')}</option><option value="electrical">{t('Electrical')}</option><option value="civil">{t('Civil')}</option></select></label>
+          <label>{t('Purpose')}<select value={documentDraft.purpose} onChange={(event) => setDocumentDraft({ ...documentDraft, purpose: event.target.value })}><option value="construction">{t('For construction')}</option><option value="review">{t('For review')}</option><option value="coordination">{t('For coordination')}</option><option value="record">{t('Record / as-built')}</option></select></label>
+          <label className="form-span">{t('Retained file or source reference')}<input required minLength="3" value={documentDraft.sourceReference} onChange={(event) => setDocumentDraft({ ...documentDraft, sourceReference: event.target.value })} placeholder={t('Private storage object, evidence ID, or controlled source reference')} /></label>
+          <label className="form-span">{t('Revision reason')}<input value={documentDraft.revisionReason} onChange={(event) => setDocumentDraft({ ...documentDraft, revisionReason: event.target.value })} placeholder={t('Required when this document number already has a revision')} /></label>
+          <div className="form-actions form-span"><button className="primary-button" disabled={submitting}><Plus size={15} />{t('Retain revision')}</button><button type="button" className="secondary-button" onClick={() => setCreating(false)}>{t('Cancel')}</button></div>
         </form>
       ) : null}
       {creating && view === 'transmittal' ? (
         <form className="project-control-form form-grid compact-form" data-testid="create-transmittal-form" onSubmit={submitCreate}>
-          <label className="form-span">Transmittal subject<input required minLength="3" value={transmittalDraft.subject} onChange={(event) => setTransmittalDraft({ ...transmittalDraft, subject: event.target.value })} placeholder="Construction issue package" /></label>
-          <label>Purpose<select value={transmittalDraft.purpose} onChange={(event) => setTransmittalDraft({ ...transmittalDraft, purpose: event.target.value })}><option value="for_information">For information</option><option value="for_review">For review</option><option value="for_approval">For approval</option><option value="for_construction">For construction</option><option value="as_built">As built</option></select></label>
-          <label>Acknowledgment due<input required type="date" value={transmittalDraft.dueAt} onChange={(event) => setTransmittalDraft({ ...transmittalDraft, dueAt: event.target.value })} /></label>
-          <label className="form-span">Recipients<textarea required minLength="5" value={transmittalDraft.recipients} onChange={(event) => setTransmittalDraft({ ...transmittalDraft, recipients: event.target.value })} placeholder={'One recipient per line: Name <name@example.eu>'} /></label>
+          <label className="form-span">{t('Transmittal subject')}<input required minLength="3" value={transmittalDraft.subject} onChange={(event) => setTransmittalDraft({ ...transmittalDraft, subject: event.target.value })} placeholder={t('Construction issue package')} /></label>
+          <label>{t('Purpose')}<select value={transmittalDraft.purpose} onChange={(event) => setTransmittalDraft({ ...transmittalDraft, purpose: event.target.value })}><option value="for_information">{t('For information')}</option><option value="for_review">{t('For review')}</option><option value="for_approval">{t('For approval')}</option><option value="for_construction">{t('For construction')}</option><option value="as_built">{t('As built')}</option></select></label>
+          <label>{t('Acknowledgment due')}<input required type="date" value={transmittalDraft.dueAt} onChange={(event) => setTransmittalDraft({ ...transmittalDraft, dueAt: event.target.value })} /></label>
+          <label className="form-span">{t('Recipients')}<textarea required minLength="5" value={transmittalDraft.recipients} onChange={(event) => setTransmittalDraft({ ...transmittalDraft, recipients: event.target.value })} placeholder={t('One recipient per line: Name <name@example.eu>')} /></label>
           <fieldset className="form-span document-selection">
-            <legend>Current documents and drawings</legend>
+            <legend>{t('Current documents and drawings')}</legend>
             {currentDocumentOptions.length ? currentDocumentOptions.map((document) => (
               <label className="checkbox-label" key={document.id}>
                 <input
@@ -3155,40 +3186,40 @@ function ProjectControls({
                       : transmittalDraft.documentIds.filter((id) => id !== document.id),
                   })}
                 />
-                <span><strong>{document.documentNumber} / rev {document.revision}</strong><small>{document.title}</small></span>
+                <span><strong>{t('{number} / rev {revision}', { number: document.documentNumber, revision: document.revision })}</strong><small>{document.title}</small></span>
               </label>
-            )) : <p className="workflow-note">Approve a controlled document or drawing revision before preparing a transmittal.</p>}
+            )) : <p className="workflow-note">{t('Approve a controlled document or drawing revision before preparing a transmittal.')}</p>}
           </fieldset>
-          <label className="form-span">Message<textarea value={transmittalDraft.message} onChange={(event) => setTransmittalDraft({ ...transmittalDraft, message: event.target.value })} placeholder="Purpose, requested action, and response instructions" /></label>
-          <div className="form-actions form-span"><button className="primary-button" disabled={submitting || !currentDocumentOptions.length || !transmittalDraft.documentIds.length}><Send size={15} />Prepare transmittal</button><button type="button" className="secondary-button" onClick={() => setCreating(false)}>Cancel</button></div>
+          <label className="form-span">{t('Message')}<textarea value={transmittalDraft.message} onChange={(event) => setTransmittalDraft({ ...transmittalDraft, message: event.target.value })} placeholder={t('Purpose, requested action, and response instructions')} /></label>
+          <div className="form-actions form-span"><button className="primary-button" disabled={submitting || !currentDocumentOptions.length || !transmittalDraft.documentIds.length}><Send size={15} />{t('Prepare transmittal')}</button><button type="button" className="secondary-button" onClick={() => setCreating(false)}>{t('Cancel')}</button></div>
         </form>
       ) : null}
       {creating && view === 'meeting' ? (
         <form className="project-control-form meeting-form form-grid compact-form" data-testid="create-project-meeting-form" onSubmit={submitCreate}>
-          <label className="form-span">Meeting title<input required minLength="3" value={meetingDraft.title} onChange={(event) => setMeetingDraft({ ...meetingDraft, title: event.target.value })} placeholder="Weekly project coordination" /></label>
-          <label>Meeting type<select value={meetingDraft.meetingType} onChange={(event) => setMeetingDraft({ ...meetingDraft, meetingType: event.target.value })}><option value="coordination">Coordination</option><option value="progress">Progress</option><option value="design">Design</option><option value="client">Client</option><option value="commercial">Commercial</option><option value="closeout">Closeout</option><option value="kickoff">Kickoff</option></select></label>
-          <label>Scheduled date and time<input required type="datetime-local" value={meetingDraft.scheduledAt} onChange={(event) => setMeetingDraft({ ...meetingDraft, scheduledAt: event.target.value })} /></label>
-          <label>Chair<input value={meetingDraft.chair} onChange={(event) => setMeetingDraft({ ...meetingDraft, chair: event.target.value })} placeholder="Project manager" /></label>
-          <label>Location<input value={meetingDraft.location} onChange={(event) => setMeetingDraft({ ...meetingDraft, location: event.target.value })} placeholder="Site office or retained meeting link" /></label>
-          <label className="form-span">Attendees<textarea required minLength="2" value={meetingDraft.attendees} onChange={(event) => setMeetingDraft({ ...meetingDraft, attendees: event.target.value })} placeholder={'One per line: Name or Name <name@example.eu>'} /></label>
-          <label className="form-span">Agenda<textarea required minLength="3" value={meetingDraft.agenda} onChange={(event) => setMeetingDraft({ ...meetingDraft, agenda: event.target.value })} placeholder="One agenda item per line" /></label>
-          <label className="form-span">Minutes summary<textarea required minLength="4" value={meetingDraft.minutesSummary} onChange={(event) => setMeetingDraft({ ...meetingDraft, minutesSummary: event.target.value })} placeholder="Record progress, constraints, information reviewed, and the agreed path forward." /></label>
-          <label className="form-span">Decisions<textarea value={meetingDraft.decisions} onChange={(event) => setMeetingDraft({ ...meetingDraft, decisions: event.target.value })} placeholder="One retained decision per line" /></label>
+          <label className="form-span">{t('Meeting title')}<input required minLength="3" value={meetingDraft.title} onChange={(event) => setMeetingDraft({ ...meetingDraft, title: event.target.value })} placeholder={t('Weekly project coordination')} /></label>
+          <label>{t('Meeting type')}<select value={meetingDraft.meetingType} onChange={(event) => setMeetingDraft({ ...meetingDraft, meetingType: event.target.value })}><option value="coordination">{t('Coordination')}</option><option value="progress">{t('Progress')}</option><option value="design">{t('Design')}</option><option value="client">{t('Client')}</option><option value="commercial">{t('Commercial')}</option><option value="closeout">{t('Closeout')}</option><option value="kickoff">{t('Kickoff')}</option></select></label>
+          <label>{t('Scheduled date and time')}<input required type="datetime-local" value={meetingDraft.scheduledAt} onChange={(event) => setMeetingDraft({ ...meetingDraft, scheduledAt: event.target.value })} /></label>
+          <label>{t('Chair')}<input value={meetingDraft.chair} onChange={(event) => setMeetingDraft({ ...meetingDraft, chair: event.target.value })} placeholder={t('Project manager')} /></label>
+          <label>{t('Location')}<input value={meetingDraft.location} onChange={(event) => setMeetingDraft({ ...meetingDraft, location: event.target.value })} placeholder={t('Site office or retained meeting link')} /></label>
+          <label className="form-span">{t('Attendees')}<textarea required minLength="2" value={meetingDraft.attendees} onChange={(event) => setMeetingDraft({ ...meetingDraft, attendees: event.target.value })} placeholder={t('One per line: Name or Name <name@example.eu>')} /></label>
+          <label className="form-span">{t('Agenda')}<textarea required minLength="3" value={meetingDraft.agenda} onChange={(event) => setMeetingDraft({ ...meetingDraft, agenda: event.target.value })} placeholder={t('One agenda item per line')} /></label>
+          <label className="form-span">{t('Minutes summary')}<textarea required minLength="4" value={meetingDraft.minutesSummary} onChange={(event) => setMeetingDraft({ ...meetingDraft, minutesSummary: event.target.value })} placeholder={t('Record progress, constraints, information reviewed, and the agreed path forward.')} /></label>
+          <label className="form-span">{t('Decisions')}<textarea value={meetingDraft.decisions} onChange={(event) => setMeetingDraft({ ...meetingDraft, decisions: event.target.value })} placeholder={t('One retained decision per line')} /></label>
           <fieldset className="form-span meeting-action-editor">
-            <legend>Assigned action items</legend>
+            <legend>{t('Assigned action items')}</legend>
             {meetingDraft.actions.map((action, index) => (
               <div className="meeting-action-draft" key={action.key} data-testid={`meeting-action-draft-${index + 1}`}>
-                <label>Action<input required minLength="3" value={action.title} onChange={(event) => updateMeetingAction(action.key, { title: event.target.value })} placeholder="Confirm delivery window" /></label>
-                <label>Owner<input required minLength="2" value={action.ownerName} onChange={(event) => updateMeetingAction(action.key, { ownerName: event.target.value })} placeholder="Named responsible person" /></label>
-                <label>Due date<input type="date" value={action.dueAt} onChange={(event) => updateMeetingAction(action.key, { dueAt: event.target.value })} /></label>
-                <label>Priority<select value={action.priority} onChange={(event) => updateMeetingAction(action.key, { priority: event.target.value })}><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="critical">Critical</option></select></label>
-                <label className="meeting-action-description">Details<input value={action.description} onChange={(event) => updateMeetingAction(action.key, { description: event.target.value })} placeholder="Completion condition or retained context" /></label>
-                <button type="button" className="icon-button" aria-label={`Remove action ${index + 1}`} onClick={() => removeMeetingAction(action.key)}><X size={15} /></button>
+                <label>{t('Action')}<input required minLength="3" value={action.title} onChange={(event) => updateMeetingAction(action.key, { title: event.target.value })} placeholder={t('Confirm delivery window')} /></label>
+                <label>{t('Owner')}<input required minLength="2" value={action.ownerName} onChange={(event) => updateMeetingAction(action.key, { ownerName: event.target.value })} placeholder={t('Named responsible person')} /></label>
+                <label>{t('Due date')}<input type="date" value={action.dueAt} onChange={(event) => updateMeetingAction(action.key, { dueAt: event.target.value })} /></label>
+                <label>{t('Priority')}<select value={action.priority} onChange={(event) => updateMeetingAction(action.key, { priority: event.target.value })}><option value="low">{t('Low')}</option><option value="medium">{t('Medium')}</option><option value="high">{t('High')}</option><option value="critical">{t('Critical')}</option></select></label>
+                <label className="meeting-action-description">{t('Details')}<input value={action.description} onChange={(event) => updateMeetingAction(action.key, { description: event.target.value })} placeholder={t('Completion condition or retained context')} /></label>
+                <button type="button" className="icon-button" aria-label={t('Remove action {number}', { number: index + 1 })} onClick={() => removeMeetingAction(action.key)}><X size={15} /></button>
               </div>
             ))}
-            <button type="button" className="secondary-button meeting-action-add" onClick={() => setMeetingDraft((current) => ({ ...current, actions: [...current.actions, emptyMeetingActionDraft()] }))}><Plus size={15} />Add action</button>
+            <button type="button" className="secondary-button meeting-action-add" onClick={() => setMeetingDraft((current) => ({ ...current, actions: [...current.actions, emptyMeetingActionDraft()] }))}><Plus size={15} />{t('Add action')}</button>
           </fieldset>
-          <div className="form-actions form-span"><button className="primary-button" disabled={submitting}><ClipboardCheck size={15} />Retain draft minutes</button><button type="button" className="secondary-button" onClick={() => setCreating(false)}>Cancel</button></div>
+          <div className="form-actions form-span"><button className="primary-button" disabled={submitting}><ClipboardCheck size={15} />{t('Retain draft minutes')}</button><button type="button" className="secondary-button" onClick={() => setCreating(false)}>{t('Cancel')}</button></div>
         </form>
       ) : null}
       <div className="project-control-register" role="tabpanel">
@@ -3211,64 +3242,87 @@ function ProjectControls({
           return (
             <article className="project-control-row" key={record.id} data-testid={`project-control-${view}-${record.id}`}>
               <div className="project-control-copy">
-                <div><strong>{recordTitle}</strong><span className={`status status-${record.status}`}>{formatStatus(record.status)}</span>{view === 'document' && record.status === 'approved' && record.data?.isCurrent !== false ? <span className="tag tag-green">Current</span> : null}</div>
-                <small>{view === 'rfi' ? `${formatStatus(record.data?.discipline || 'general')} / due ${formatDate(record.dueAt)}` : view === 'submittal' ? `${record.packageName || record.data?.material || 'Package'} / due ${formatDate(record.dueAt)}` : view === 'document' ? `${record.documentNumber || 'Unnumbered'} / rev ${record.revision || '-'} / ${formatStatus(record.discipline || 'general')}` : view === 'transmittal' ? `${record.transmittalNumber} / ${formatStatus(record.purpose)} / ${record.documents?.length || 0} revision(s) / ${record.recipients?.length || 0} recipient(s)` : `${record.meetingNumber} / ${formatStatus(record.meetingType)} / ${formatDateTime(record.scheduledAt)} / ${record.attendees?.length || 0} attendee(s)`}</small>
-                {view === 'rfi' ? <p>{record.response || record.question || 'Question details not retained.'}</p> : null}
-                {view === 'document' ? <p>{record.data?.revisionReason || record.data?.sourceReference || 'Controlled source retained.'}</p> : null}
-                {view === 'transmittal' ? <p>{record.issuedAt ? `Issued ${formatDateTime(record.issuedAt)} / ${openReceipts.length} receipt(s) open` : `Approval and recorded delivery evidence are required before issue / due ${formatDate(record.dueAt)}`}</p> : null}
-                {view === 'meeting' ? <p>{record.minutesSummary || 'Draft minutes have no retained summary.'}</p> : null}
+                <div><strong>{recordTitle}</strong><span className={`status status-${record.status}`}>{formatStatus(record.status)}</span>{view === 'document' && record.status === 'approved' && record.data?.isCurrent !== false ? <span className="tag tag-green">{t('Current')}</span> : null}</div>
+                <small>{view === 'rfi'
+                  ? t('{discipline} / due {date}', { discipline: formatControlValue(record.data?.discipline || 'general'), date: formatDate(record.dueAt) })
+                  : view === 'submittal'
+                    ? t('{package} / due {date}', { package: record.packageName || record.data?.material || t('Package'), date: formatDate(record.dueAt) })
+                    : view === 'document'
+                      ? t('{number} / rev {revision} / {discipline}', { number: record.documentNumber || t('Unnumbered'), revision: record.revision || '-', discipline: formatControlValue(record.discipline || 'general') })
+                      : view === 'transmittal'
+                        ? t('{number} / {purpose} / {revisions} / {recipients}', {
+                          number: record.transmittalNumber,
+                          purpose: formatControlValue(record.purpose),
+                          revisions: t((record.documents?.length || 0) === 1 ? '{count} revision' : '{count} revisions', { count: record.documents?.length || 0 }),
+                          recipients: t((record.recipients?.length || 0) === 1 ? '{count} recipient' : '{count} recipients', { count: record.recipients?.length || 0 }),
+                        })
+                        : t('{number} / {type} / {date} / {attendees}', {
+                          number: record.meetingNumber,
+                          type: formatControlValue(record.meetingType),
+                          date: formatDateTime(record.scheduledAt),
+                          attendees: t((record.attendees?.length || 0) === 1 ? '{count} attendee' : '{count} attendees', { count: record.attendees?.length || 0 }),
+                        })}</small>
+                {view === 'rfi' ? <p>{record.response || record.question || t('Question details not retained.')}</p> : null}
+                {view === 'document' ? <p>{record.data?.revisionReason || record.data?.sourceReference || t('Controlled source retained.')}</p> : null}
+                {view === 'transmittal' ? <p>{record.issuedAt
+                  ? t('Issued {date} / {receipts}', {
+                    date: formatDateTime(record.issuedAt),
+                    receipts: t(openReceipts.length === 1 ? '{count} receipt open' : '{count} receipts open', { count: openReceipts.length }),
+                  })
+                  : t('Approval and recorded delivery evidence are required before issue / due {date}', { date: formatDate(record.dueAt) })}</p> : null}
+                {view === 'meeting' ? <p>{record.minutesSummary || t('Draft minutes have no retained summary.')}</p> : null}
                 {view === 'meeting' && meetingActions.length ? (
-                  <div className="meeting-action-register" aria-label={`${record.meetingNumber} action items`}>
+                  <div className="meeting-action-register" aria-label={t('{number} action items', { number: record.meetingNumber })}>
                     {meetingActions.map((action) => (
                       <span key={action.id} className={`meeting-action-chip meeting-action-${action.status}`}>
                         <strong>{action.itemNumber}. {action.title}</strong>
-                        <small>{action.ownerName} / due {formatDate(action.dueAt)} / {formatStatus(action.status)}</small>
+                        <small>{t('{owner} / due {date} / {status}', { owner: action.ownerName, date: formatDate(action.dueAt), status: formatStatus(action.status) })}</small>
                       </span>
                     ))}
                   </div>
                 ) : null}
               </div>
               <div className="project-control-actions">
-                {pending && canApprove ? <button type="button" className="secondary-button" disabled={submitting} onClick={() => onOpenApprovals({ approvalId: pending.id })}><ShieldCheck size={14} />Review decision</button> : null}
-                {canCoordinate && !pending && isRfiOpen ? <button type="button" className="secondary-button" disabled={submitting} onClick={() => openReview('rfi', record, 'answered')}><MessageSquareText size={14} />Answer</button> : null}
-                {canCoordinate && !pending && isSubmittalDraft ? <button type="button" className="secondary-button" disabled={submitting} onClick={() => openReview('submittal', record, 'submitted')}><FileUp size={14} />Submit</button> : null}
-                {canCoordinate && !pending && isSubmittalReview ? <button type="button" className="secondary-button" disabled={submitting} onClick={() => openReview('submittal', record, 'approved')}><ShieldCheck size={14} />Request approval</button> : null}
-                {canCoordinate && !pending && isDocumentReview ? <button type="button" className="secondary-button" disabled={submitting} onClick={() => openReview('document', record, 'approved')}><ShieldCheck size={14} />Review revision</button> : null}
-                {canCoordinate && !pending && canRecordTransmittalIssue ? <button type="button" className="secondary-button" disabled={submitting} onClick={() => openReview('transmittal_issue', record, 'issued')}><Send size={14} />Record issue</button> : null}
-                {canCoordinate && openReceipts.length ? <button type="button" className="secondary-button" disabled={submitting} onClick={() => openReview('transmittal_ack', record, 'acknowledged', openReceipts[0])}><MailCheck size={14} />Record receipt</button> : null}
-                {canCoordinate && !pending && canSubmitMeeting ? <button type="button" className="secondary-button" disabled={submitting} onClick={() => openReview('meeting_submit', record, 'pending_approval')}><ShieldCheck size={14} />Submit minutes</button> : null}
-                {canCoordinate && !pending && canIssueMeeting ? <button type="button" className="secondary-button" disabled={submitting} onClick={() => openReview('meeting_issue', record, 'issued')}><Send size={14} />Record issue</button> : null}
-                {canCoordinate && openMeetingItems.length ? <button type="button" className="secondary-button" disabled={submitting} onClick={() => openReview('meeting_action', record, 'completed', openMeetingItems[0])}><Check size={14} />Complete action</button> : null}
-                {canCoordinate && canFollowUpMeeting ? <button type="button" className="secondary-button" disabled={submitting} onClick={() => openReview('meeting_followup', record, 'draft')}><CalendarDays size={14} />Follow-up</button> : null}
+                {pending && canApprove ? <button type="button" className="secondary-button" disabled={submitting} onClick={() => onOpenApprovals({ approvalId: pending.id })}><ShieldCheck size={14} />{t('Review decision')}</button> : null}
+                {canCoordinate && !pending && isRfiOpen ? <button type="button" className="secondary-button" disabled={submitting} onClick={() => openReview('rfi', record, 'answered')}><MessageSquareText size={14} />{t('Answer')}</button> : null}
+                {canCoordinate && !pending && isSubmittalDraft ? <button type="button" className="secondary-button" disabled={submitting} onClick={() => openReview('submittal', record, 'submitted')}><FileUp size={14} />{t('Submit')}</button> : null}
+                {canCoordinate && !pending && isSubmittalReview ? <button type="button" className="secondary-button" disabled={submitting} onClick={() => openReview('submittal', record, 'approved')}><ShieldCheck size={14} />{t('Request approval')}</button> : null}
+                {canCoordinate && !pending && isDocumentReview ? <button type="button" className="secondary-button" disabled={submitting} onClick={() => openReview('document', record, 'approved')}><ShieldCheck size={14} />{t('Review revision')}</button> : null}
+                {canCoordinate && !pending && canRecordTransmittalIssue ? <button type="button" className="secondary-button" disabled={submitting} onClick={() => openReview('transmittal_issue', record, 'issued')}><Send size={14} />{t('Record issue')}</button> : null}
+                {canCoordinate && openReceipts.length ? <button type="button" className="secondary-button" disabled={submitting} onClick={() => openReview('transmittal_ack', record, 'acknowledged', openReceipts[0])}><MailCheck size={14} />{t('Record receipt')}</button> : null}
+                {canCoordinate && !pending && canSubmitMeeting ? <button type="button" className="secondary-button" disabled={submitting} onClick={() => openReview('meeting_submit', record, 'pending_approval')}><ShieldCheck size={14} />{t('Submit minutes')}</button> : null}
+                {canCoordinate && !pending && canIssueMeeting ? <button type="button" className="secondary-button" disabled={submitting} onClick={() => openReview('meeting_issue', record, 'issued')}><Send size={14} />{t('Record issue')}</button> : null}
+                {canCoordinate && openMeetingItems.length ? <button type="button" className="secondary-button" disabled={submitting} onClick={() => openReview('meeting_action', record, 'completed', openMeetingItems[0])}><Check size={14} />{t('Complete action')}</button> : null}
+                {canCoordinate && canFollowUpMeeting ? <button type="button" className="secondary-button" disabled={submitting} onClick={() => openReview('meeting_followup', record, 'draft')}><CalendarDays size={14} />{t('Follow-up')}</button> : null}
               </div>
             </article>
           )
-        }) : <p className="workflow-note">No {view === 'rfi' ? 'RFIs' : view === 'submittal' ? 'submittals' : view === 'document' ? 'controlled document revisions' : view === 'transmittal' ? 'document transmittals' : 'project meeting minutes'} have been retained for this job.</p>}
+        }) : <p className="workflow-note">{t('No {records} have been retained for this job.', { records: t(view === 'rfi' ? 'RFIs' : view === 'submittal' ? 'submittals' : view === 'document' ? 'controlled document revisions' : view === 'transmittal' ? 'document transmittals' : 'project meeting minutes') })}</p>}
       </div>
       {review.record ? (
         <form className="project-control-review" data-testid="project-control-review-form" onSubmit={submitReview}>
-          <div><strong>{reviewLabel}</strong><small>{review.record.title || review.record.subject} / target {formatStatus(review.status)}</small></div>
+          <div><strong>{reviewLabel}</strong><small>{t('{record} / target {status}', { record: review.record.title || review.record.subject, status: formatStatus(review.status) })}</small></div>
           {review.type === 'transmittal_ack' ? (
-            <label>Recipient receipt<select value={review.receiptId} onChange={(event) => {
+            <label>{t('Recipient receipt')}<select value={review.receiptId} onChange={(event) => {
               const receipt = (review.record.receipts || EMPTY_LIST).find((item) => item.id === event.target.value)
               setReview({ ...review, receiptId: event.target.value, acknowledgedBy: receipt?.recipientName || review.acknowledgedBy })
             }}>{(review.record.receipts || EMPTY_LIST).filter((receipt) => receipt.status === 'awaiting_acknowledgment').map((receipt) => <option value={receipt.id} key={receipt.id}>{receipt.recipientName} / {receipt.recipientEmail}</option>)}</select></label>
           ) : null}
           {review.type === 'meeting_action' ? (
-            <label>Open action<select value={review.actionId} onChange={(event) => {
+            <label>{t('Open action')}<select value={review.actionId} onChange={(event) => {
               const action = (review.record.actions || EMPTY_LIST).find((item) => item.id === event.target.value)
               setReview({ ...review, actionId: event.target.value, completedBy: action?.ownerName || review.completedBy })
             }}>{(review.record.actions || EMPTY_LIST).filter((action) => action.status === 'open').map((action) => <option value={action.id} key={action.id}>{action.itemNumber}. {action.title} / {action.ownerName}</option>)}</select></label>
           ) : null}
-          {review.type === 'meeting_followup' ? <label>Follow-up date and time<input required type="datetime-local" value={review.scheduledAt} onChange={(event) => setReview({ ...review, scheduledAt: event.target.value })} /></label> : null}
-          {['document', 'transmittal_issue', 'transmittal_ack', 'meeting_issue', 'meeting_action'].includes(review.type) ? <label>{review.type === 'document' ? 'Review reference' : review.type === 'transmittal_issue' || review.type === 'meeting_issue' ? 'Delivery evidence reference' : review.type === 'meeting_action' ? 'Completion evidence reference' : 'Acknowledgment evidence reference'}<input required minLength="3" value={review.reference} onChange={(event) => setReview({ ...review, reference: event.target.value })} placeholder={review.type === 'document' ? 'Checker record or retained review evidence' : 'Provider receipt, email evidence, signed record, or retained document ID'} /></label> : null}
-          {review.type === 'transmittal_ack' ? <label>Acknowledged by<input required minLength="2" value={review.acknowledgedBy} onChange={(event) => setReview({ ...review, acknowledgedBy: event.target.value })} placeholder="Recipient shown on the evidence" /></label> : null}
-          {review.type === 'meeting_action' ? <label>Completed by<input required minLength="2" value={review.completedBy} onChange={(event) => setReview({ ...review, completedBy: event.target.value })} placeholder="Person verified on the completion evidence" /></label> : null}
-          <label>{review.type === 'rfi' ? 'Response and evidence' : review.type === 'meeting_followup' ? 'Follow-up minutes summary' : review.type.startsWith('transmittal_') || review.type.startsWith('meeting_') ? 'Evidence notes' : 'Review evidence'}<textarea required minLength="4" value={review.notes} onChange={(event) => setReview({ ...review, notes: event.target.value })} placeholder="Record the technical basis and evidence for this status change." /></label>
-          <div className="form-actions"><button className="primary-button" disabled={submitting || review.notes.trim().length < 4 || (['document', 'transmittal_issue', 'transmittal_ack', 'meeting_issue', 'meeting_action'].includes(review.type) && review.reference.trim().length < 3) || (review.type === 'transmittal_ack' && (!review.receiptId || review.acknowledgedBy.trim().length < 2)) || (review.type === 'meeting_action' && (!review.actionId || review.completedBy.trim().length < 2)) || (review.type === 'meeting_followup' && !toIsoDateTime(review.scheduledAt))}><ShieldCheck size={15} />{reviewLabel}</button><button type="button" className="secondary-button" onClick={() => setReview(emptyProjectControlReview())}>Cancel</button></div>
+          {review.type === 'meeting_followup' ? <label>{t('Follow-up date and time')}<input required type="datetime-local" value={review.scheduledAt} onChange={(event) => setReview({ ...review, scheduledAt: event.target.value })} /></label> : null}
+          {['document', 'transmittal_issue', 'transmittal_ack', 'meeting_issue', 'meeting_action'].includes(review.type) ? <label>{t(review.type === 'document' ? 'Review reference' : review.type === 'transmittal_issue' || review.type === 'meeting_issue' ? 'Delivery evidence reference' : review.type === 'meeting_action' ? 'Completion evidence reference' : 'Acknowledgment evidence reference')}<input required minLength="3" value={review.reference} onChange={(event) => setReview({ ...review, reference: event.target.value })} placeholder={t(review.type === 'document' ? 'Checker record or retained review evidence' : 'Provider receipt, email evidence, signed record, or retained document ID')} /></label> : null}
+          {review.type === 'transmittal_ack' ? <label>{t('Acknowledged by')}<input required minLength="2" value={review.acknowledgedBy} onChange={(event) => setReview({ ...review, acknowledgedBy: event.target.value })} placeholder={t('Recipient shown on the evidence')} /></label> : null}
+          {review.type === 'meeting_action' ? <label>{t('Completed by')}<input required minLength="2" value={review.completedBy} onChange={(event) => setReview({ ...review, completedBy: event.target.value })} placeholder={t('Person verified on the completion evidence')} /></label> : null}
+          <label>{t(review.type === 'rfi' ? 'Response and evidence' : review.type === 'meeting_followup' ? 'Follow-up minutes summary' : review.type.startsWith('transmittal_') || review.type.startsWith('meeting_') ? 'Evidence notes' : 'Review evidence')}<textarea required minLength="4" value={review.notes} onChange={(event) => setReview({ ...review, notes: event.target.value })} placeholder={t('Record the technical basis and evidence for this status change.')} /></label>
+          <div className="form-actions"><button className="primary-button" disabled={submitting || review.notes.trim().length < 4 || (['document', 'transmittal_issue', 'transmittal_ack', 'meeting_issue', 'meeting_action'].includes(review.type) && review.reference.trim().length < 3) || (review.type === 'transmittal_ack' && (!review.receiptId || review.acknowledgedBy.trim().length < 2)) || (review.type === 'meeting_action' && (!review.actionId || review.completedBy.trim().length < 2)) || (review.type === 'meeting_followup' && !toIsoDateTime(review.scheduledAt))}><ShieldCheck size={15} />{reviewLabel}</button><button type="button" className="secondary-button" onClick={() => setReview(emptyProjectControlReview())}>{t('Cancel')}</button></div>
         </form>
       ) : null}
-      {!canCoordinate ? <p className="workflow-note">Field access is read-only for project controls. Design responses and revision status remain office-controlled.</p> : null}
+      {!canCoordinate ? <p className="workflow-note">{t('Field access is read-only for project controls. Design responses and revision status remain office-controlled.')}</p> : null}
     </section>
   )
 }

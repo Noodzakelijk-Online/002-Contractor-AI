@@ -15905,6 +15905,7 @@ function App() {
                   />
                   <ProjectControls
                     job={selectedJob}
+                    locale={operatorLocale}
                     canCoordinate={canCoordinate}
                     canApprove={capabilities.approvals === true}
                     submitting={submitting}
