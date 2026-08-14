@@ -8483,6 +8483,7 @@ class ContractorOperatingLedger {
     if (!/^[a-f0-9]{64}$/.test(normalizedKeyHash)) throw new Error('Authentication rate-limit key must be a SHA-256 hash');
     const limit = Math.max(1, Math.round(normalizeNumber(options.limit, 10)));
     const windowMs = Math.max(1_000, Math.round(normalizeNumber(options.windowMs, 900_000)));
+    const maxEntries = Math.max(1, Math.round(normalizeNumber(options.maxEntries, 5_000)));
     const now = options.now ? new Date(options.now) : new Date();
     if (Number.isNaN(now.getTime())) throw new Error('Authentication rate-limit time is invalid');
     const timestamp = now.toISOString();
@@ -8499,6 +8500,19 @@ class ContractorOperatingLedger {
         SET attempt_count = attempt_count + 1, updated_at = ?
         WHERE key_hash = ?
       `).run(timestamp, normalizedKeyHash);
+      const count = Number(this.db.prepare('SELECT COUNT(*) AS count FROM auth_rate_limits').get()?.count || 0);
+      const excess = Math.max(0, count - maxEntries);
+      if (excess > 0) {
+        this.db.prepare(`
+          DELETE FROM auth_rate_limits
+          WHERE key_hash IN (
+            SELECT key_hash FROM auth_rate_limits
+            WHERE key_hash <> ?
+            ORDER BY updated_at ASC, key_hash ASC
+            LIMIT ?
+          )
+        `).run(normalizedKeyHash, excess);
+      }
       return this.getAuthenticationRateLimit(normalizedKeyHash, { limit, windowMs, now: timestamp });
     });
   }

@@ -8,7 +8,8 @@ services:
     environment:
       NODE_ENV: production
       CONTRACTOR_AI_RUNTIME_MODE: hosted
-      CONTRACTOR_AI_DATABASE_URL: ${CONTRACTOR_AI_DATABASE_URL:?Set a managed EU PostgreSQL URL with sslmode=require or verify-full in .env.hosted}
+      CONTRACTOR_AI_BIND_HOST: 0.0.0.0
+      CONTRACTOR_AI_DATABASE_URL: ${CONTRACTOR_AI_DATABASE_URL:?Set a managed EU PostgreSQL URL with sslmode=verify-full in .env.hosted}
     init: true
     read_only: true
     tmpfs:

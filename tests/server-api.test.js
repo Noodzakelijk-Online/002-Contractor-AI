@@ -203,6 +203,37 @@ test('ledger evidence uploads retain documents and create approval-safe follow-u
   });
   assert.equal(conflictingOwner.response.status, 400);
   assert.equal(conflictingOwner.body.error.code, 'ledger_evidence_owner_invalid');
+
+  const reboundStorage = await request(baseUrl, '/api/ledger/upload', {
+    method: 'POST',
+    body: JSON.stringify({
+      filename: 'rebound.jpg',
+      fileType: 'image/jpeg',
+      jobId: intake.body.job.id,
+      storageRef: 'data/uploads/known-foreign-object.jpg'
+    })
+  });
+  assert.equal(reboundStorage.response.status, 400);
+  assert.equal(reboundStorage.body.error.code, 'client_storage_reference_forbidden');
+});
+
+test('multipart evidence rejects excessive part cardinality before upload processing', async t => {
+  const server = app.listen(0);
+  await new Promise(resolve => server.once('listening', resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+
+  const boundary = 'contractor-ai-boundary-2026';
+  const parts = Array.from({ length: 80 }, (_, index) => (
+    `--${boundary}\r\nContent-Disposition: form-data; name="field${index}"\r\n\r\nvalue${index}\r\n`
+  )).join('') + `--${boundary}--\r\n`;
+  const response = await fetch(`http://127.0.0.1:${server.address().port}/api/ledger/upload`, {
+    method: 'POST',
+    headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}` },
+    body: parts
+  });
+  const body = await response.json();
+  assert.equal(response.status, 413);
+  assert.equal(body.error.code, 'multipart_parts_exceeded');
 });
 test('multipart field upload stores local evidence and links ledger document', async t => {
   const server = app.listen(0);

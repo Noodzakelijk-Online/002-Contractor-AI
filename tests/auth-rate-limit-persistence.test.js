@@ -49,3 +49,25 @@ test('expired authentication failure windows are removed before a new attempt', 
     ledger.close();
   }
 });
+
+test('authentication failure storage evicts old windows above its hard cardinality bound', t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'contractor-ai-auth-rate-bound-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const ledger = new ContractorOperatingLedger({ dbFile: path.join(directory, 'ledger.sqlite') });
+  const keys = Array.from({ length: 8 }, (_, index) => crypto.createHash('sha256').update(`bounded-client-${index}`).digest('hex'));
+  try {
+    keys.forEach((keyHash, index) => {
+      ledger.recordAuthenticationFailure(keyHash, {
+        limit: 3,
+        windowMs: 900_000,
+        maxEntries: 3,
+        now: new Date(Date.parse('2026-07-13T09:00:00.000Z') + index * 1_000).toISOString()
+      });
+    });
+    const retained = ledger.db.prepare('SELECT key_hash FROM auth_rate_limits ORDER BY updated_at ASC').all();
+    assert.equal(retained.length, 3);
+    assert.deepEqual(retained.map(row => row.key_hash), keys.slice(-3));
+  } finally {
+    ledger.close();
+  }
+});

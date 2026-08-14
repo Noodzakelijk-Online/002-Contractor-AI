@@ -2,7 +2,7 @@ services:
   contractor-ai:
     build: .
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     env_file:
       - path: .env
         required: false
@@ -11,6 +11,7 @@ services:
       CONTRACTOR_AI_RUNTIME_MODE: ${CONTRACTOR_AI_RUNTIME_MODE:-local}
       CONTRACTOR_AI_STORAGE_MODE: ${CONTRACTOR_AI_STORAGE_MODE:-local}
       CONTRACTOR_AI_REQUIRE_AUTH: ${CONTRACTOR_AI_REQUIRE_AUTH:-false}
+      CONTRACTOR_AI_BIND_HOST: 0.0.0.0
     volumes:
       - contractor-ai-data:/var/lib/contractor-ai
     restart: unless-stopped

@@ -33,7 +33,7 @@ const packageMetadata = require('./package.json');
 
 const app = express();
 const port = process.env.PORT || 3000;
-const configuredBindHost = String(process.env.CONTRACTOR_AI_BIND_HOST || '').trim();
+const configuredBindHost = String(process.env.CONTRACTOR_AI_BIND_HOST || '127.0.0.1').trim();
 const weatherService = new OpenMeteoWeatherService({
   enabled: process.env.WEATHER_PROVIDER_ENABLED !== 'false'
 });
@@ -131,6 +131,7 @@ const evidenceStorageEndpointProtocol = (() => {
 })();
 const evidenceStorageVerificationTtlMs = Math.max(5_000, Number(process.env.CONTRACTOR_AI_STORAGE_VERIFY_TTL_MS || 60_000));
 const ledgerDiagnosticsCacheTtlMs = boundedInteger(process.env.CONTRACTOR_AI_DIAGNOSTICS_CACHE_TTL_MS, 2_000, 250, 30_000);
+const operationalReadinessCacheTtlMs = boundedInteger(process.env.CONTRACTOR_AI_READINESS_CACHE_TTL_MS, 60_000, 5_000, 300_000);
 let evidenceStorageVerificationCache = evidenceStorageInitError
   ? {
       ready: false,
@@ -143,12 +144,16 @@ let evidenceStorageVerificationCache = evidenceStorageInitError
 let evidenceStorageVerificationPromise = null;
 let ledgerDiagnosticsCache = null;
 const maxUploadBytes = Math.max(1024, Number(process.env.MAX_UPLOAD_BYTES || 10 * 1024 * 1024));
+const maxMultipartParts = boundedInteger(process.env.CONTRACTOR_AI_MULTIPART_MAX_PARTS, 64, 8, 256);
+const maxMultipartFields = boundedInteger(process.env.CONTRACTOR_AI_MULTIPART_MAX_FIELDS, 32, 4, 128);
+const maxMultipartHeaderPairs = boundedInteger(process.env.CONTRACTOR_AI_MULTIPART_MAX_HEADER_PAIRS, 16, 4, 64);
+const maxMultipartFieldBytes = boundedInteger(process.env.CONTRACTOR_AI_MULTIPART_MAX_FIELD_BYTES, 65_536, 1_024, 262_144);
 const allowedOrigins = (process.env.CORS_ORIGINS || 'http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173')
   .split(',')
   .map(origin => origin.trim())
   .filter(Boolean);
 const isProduction = process.env.NODE_ENV === 'production';
-const dashboardAuthRequired = isProduction || process.env.CONTRACTOR_AI_REQUIRE_AUTH === 'true';
+const dashboardAuthRequired = isProduction || runtimeMode === 'hosted' || process.env.CONTRACTOR_AI_REQUIRE_AUTH === 'true';
 const dashboardAuthToken = process.env.CONTRACTOR_AI_AUTH_TOKEN || process.env.DASHBOARD_AUTH_TOKEN || '';
 const minimumOperatorTokenLength = 32;
 const roleTokenConfig = parseRoleTokens(process.env.CONTRACTOR_AI_ROLE_TOKENS);
@@ -156,6 +161,7 @@ const operatorSessionCookieName = 'contractor_ai_session';
 const operatorSessionTtlSeconds = boundedInteger(process.env.CONTRACTOR_AI_SESSION_TTL_SECONDS, 28_800, 900, 86_400);
 const authLoginRateWindowMs = boundedInteger(process.env.CONTRACTOR_AI_LOGIN_RATE_WINDOW_MS, 900_000, 60_000, 86_400_000);
 const authLoginRateLimit = boundedInteger(process.env.CONTRACTOR_AI_LOGIN_RATE_LIMIT, 10, 3, 100);
+const authLoginRateBucketLimit = boundedInteger(process.env.CONTRACTOR_AI_LOGIN_RATE_BUCKET_LIMIT, 5_000, 100, 100_000);
 const operatorSessionSigningKey = createOperatorSessionSigningKey();
 const httpKeepAliveTimeoutMs = boundedInteger(process.env.CONTRACTOR_AI_HTTP_KEEP_ALIVE_TIMEOUT_MS, 65_000, 5_000, 300_000);
 const httpHeadersTimeoutMs = boundedInteger(
@@ -331,8 +337,8 @@ function runtimeConfiguration(options = {}) {
   if (hosted && !hostedDatabaseUrl) {
     issues.push({ code: 'durable_database_required', message: 'Hosted mode requires CONTRACTOR_AI_DATABASE_URL for the managed PostgreSQL migration target.' });
   }
-  if (hosted && ['disable', 'allow', 'prefer', 'invalid'].includes(hostedDatabaseSslMode)) {
-    issues.push({ code: 'hosted_postgres_tls_required', message: 'Hosted mode requires a valid PostgreSQL connection with TLS required; use sslmode=require or verify-full.' });
+  if (hosted && hostedDatabaseSslMode !== 'verify-full') {
+    issues.push({ code: 'hosted_postgres_tls_required', message: 'Hosted mode requires PostgreSQL certificate and hostname verification with sslmode=verify-full.' });
   }
   if (hosted && operatingLedger?.databaseMode !== 'postgres') {
     issues.push({ code: 'hosted_postgres_adapter_required', message: 'Hosted mode requires the PostgreSQL ledger adapter.' });
@@ -415,6 +421,7 @@ function runtimeConfiguration(options = {}) {
       limit: apiRateLimit,
       windowMs: apiRateWindowMs,
       bucketCount: apiRateBucketLimit,
+      loginBucketCount: authLoginRateBucketLimit,
       boundedCardinality: true,
       multiReplicaSafe: true
     },
@@ -513,7 +520,15 @@ function setApiRateLimitHeaders(res, state) {
 
 function authenticationRateLimitKey(req) {
   const remoteAddress = String(req.ip || req.socket?.remoteAddress || 'unknown');
-  return crypto.createHmac('sha256', operatorSessionSigningKey).update('contractor-ai-auth-login\0').update(remoteAddress).digest('hex');
+  const clientDigest = crypto.createHmac('sha256', operatorSessionSigningKey)
+    .update('contractor-ai-auth-login-client\0')
+    .update(remoteAddress)
+    .digest();
+  const bucket = clientDigest.readUInt32BE(0) % authLoginRateBucketLimit;
+  return crypto.createHmac('sha256', operatorSessionSigningKey)
+    .update('contractor-ai-auth-login-bucket\0')
+    .update(String(bucket))
+    .digest('hex');
 }
 
 function setAuthenticationRateLimitHeaders(res, state) {
@@ -553,7 +568,8 @@ function recordAuthenticationFailure(req, res) {
   try {
     const state = operatingLedger.recordAuthenticationFailure(req.authenticationRateLimit.keyHash, {
       limit: authLoginRateLimit,
-      windowMs: authLoginRateWindowMs
+      windowMs: authLoginRateWindowMs,
+      maxEntries: authLoginRateBucketLimit
     });
     const resetSeconds = setAuthenticationRateLimitHeaders(res, state);
     if (state.attemptCount > authLoginRateLimit) {
@@ -650,12 +666,25 @@ function parseMultipartBody(buffer, contentType = '') {
   if (!boundary) {
     throw new UploadRequestError(400, 'missing_multipart_boundary', 'Multipart boundary is missing');
   }
+  if (!/^[0-9A-Za-z'()+_,\-./:=?]{12,70}$/.test(boundary)) {
+    throw new UploadRequestError(400, 'invalid_multipart_boundary', 'Multipart boundary syntax or length is invalid');
+  }
 
   const body = buffer.toString('latin1');
   const delimiter = `--${boundary}`;
+  let delimiterCount = 0;
+  let delimiterOffset = 0;
+  while ((delimiterOffset = body.indexOf(delimiter, delimiterOffset)) !== -1) {
+    delimiterCount += 1;
+    if (delimiterCount > maxMultipartParts + 1) {
+      throw new UploadRequestError(413, 'multipart_parts_exceeded', `Multipart upload exceeds ${maxMultipartParts} parts`);
+    }
+    delimiterOffset += delimiter.length;
+  }
   const parts = body.split(delimiter).slice(1, -1);
   const fields = {};
   const files = [];
+  let fieldCount = 0;
 
   for (let rawPart of parts) {
     if (rawPart.startsWith('\r\n')) rawPart = rawPart.slice(2);
@@ -664,6 +693,9 @@ function parseMultipartBody(buffer, contentType = '') {
     if (headerEnd === -1) continue;
 
     const headerLines = rawPart.slice(0, headerEnd).split('\r\n');
+    if (headerLines.length > maxMultipartHeaderPairs) {
+      throw new UploadRequestError(413, 'multipart_headers_exceeded', `Multipart part exceeds ${maxMultipartHeaderPairs} headers`);
+    }
     const headers = {};
     for (const line of headerLines) {
       const separator = line.indexOf(':');
@@ -677,6 +709,9 @@ function parseMultipartBody(buffer, contentType = '') {
 
     const content = rawPart.slice(headerEnd + 4);
     if (disposition.filename !== undefined) {
+      if (files.length >= 1) {
+        throw new UploadRequestError(413, 'multipart_files_exceeded', 'Evidence upload accepts exactly one file');
+      }
       const originalName = sanitizeUploadFilename(disposition.filename);
       const bytes = Buffer.from(content, 'latin1');
       if (!bytes.length || !originalName) continue;
@@ -690,6 +725,13 @@ function parseMultipartBody(buffer, contentType = '') {
       continue;
     }
 
+    fieldCount += 1;
+    if (fieldCount > maxMultipartFields) {
+      throw new UploadRequestError(413, 'multipart_fields_exceeded', `Multipart upload exceeds ${maxMultipartFields} fields`);
+    }
+    if (Buffer.byteLength(content, 'latin1') > maxMultipartFieldBytes) {
+      throw new UploadRequestError(413, 'multipart_field_too_large', `Multipart field exceeds ${maxMultipartFieldBytes} bytes`);
+    }
     const value = Buffer.from(content, 'latin1').toString('utf8');
     if (fields[fieldName] === undefined) {
       fields[fieldName] = value;
@@ -895,7 +937,7 @@ function logSafeRequestPath(req) {
 }
 
 function isClientPortalApiPath(pathname) {
-  return /^\/api\/client-portal\/[^/]+(?:\/messages|\/feedback|\/selections\/[^/]+\/responses|\/change-orders\/[^/]+(?:\/responses|\/package))?$/.test(String(pathname || ''));
+  return /^\/api\/client-portal\/[^/]+(?:\/messages|\/feedback|\/preferences|\/selections\/[^/]+\/responses|\/change-orders\/[^/]+(?:\/responses|\/package))?$/.test(String(pathname || ''));
 }
 
 function sendError(req, res, statusCode, code, message, details) {
@@ -1977,8 +2019,22 @@ function requireOperatorAuthorization(req, res, next) {
 }
 
 function requireSessionMutationOrigin(req, res, next) {
-  if (req.operator?.authMethod !== 'session' || ['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();
+  if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();
   const origin = String(req.headers.origin || '').trim();
+  if (req.operator?.authMethod === 'local') {
+    if (!origin) return next();
+    let requestOrigin = '';
+    try {
+      requestOrigin = new URL(`${req.protocol}://${req.get('host')}`).origin;
+    } catch {
+      requestOrigin = '';
+    }
+    if (origin !== requestOrigin && !allowedOrigins.includes(origin)) {
+      return sendError(req, res, 403, 'local_origin_forbidden', 'The browser origin is not allowed to change local Contractor.AI records.');
+    }
+    return next();
+  }
+  if (req.operator?.authMethod !== 'session') return next();
   if (!origin) {
     return sendError(req, res, 403, 'session_origin_required', 'Cookie-authenticated changes require a same-origin browser request.');
   }
@@ -2012,6 +2068,13 @@ app.use(cors({
 }));
 app.use(rateLimitApi);
 app.use(requireDashboardAuth);
+app.use((req, res, next) => {
+  if ((!isProduction && runtimeMode !== 'hosted') || !req.path.startsWith('/api/') || req.path === '/api/health/ready') {
+    return next();
+  }
+  if (runtimeConfiguration().ready) return next();
+  return sendError(req, res, 503, 'runtime_not_ready', 'Contractor.AI is locked until its runtime requirements are valid.');
+});
 app.use(requireSessionMutationOrigin);
 app.use(requireOperatorAuthorization);
 const standardJsonParser = express.json({ limit: '2mb' });
@@ -2867,13 +2930,16 @@ app.get('/api/ledger/playbooks', (req, res) => {
 });
 
 app.get('/api/ledger/jobs', (req, res) => {
-  return handleLedgerRequest(req, res, () => ({
-    success: true,
-    jobs: scopedLedgerJobs(req, req.query || {}),
-    dashboard: req.operator?.role === 'field_worker'
-      ? { fieldScoped: true, jobCount: scopedLedgerJobs(req, req.query || {}).length }
-      : operatingLedger.dashboardSummary()
-  }));
+  return handleLedgerRequest(req, res, () => {
+    const jobs = scopedLedgerJobs(req, req.query || {});
+    return {
+      success: true,
+      jobs,
+      dashboard: req.operator?.role === 'field_worker'
+        ? { fieldScoped: true, jobCount: jobs.length }
+        : operatingLedger.dashboardSummary()
+    };
+  });
 });
 
 app.get('/api/ledger/opportunities', (req, res) => {
@@ -4014,7 +4080,9 @@ app.get('/api/ledger/installation-qc', (req, res) => {
         taskId: req.query.taskId || req.query.task_id,
         workerId,
         limit: req.query.limit
-      }).map(control => recordForOperator(req, control))
+      })
+        .filter(control => fieldWorkerCanAccessJob(req, control.jobId))
+        .map(control => recordForOperator(req, control))
     };
   });
 });
@@ -4049,7 +4117,9 @@ app.get('/api/ledger/photo-evidence', (req, res) => {
         workerId,
         status: req.query.status,
         limit: req.query.limit
-      }).map(set => recordForOperator(req, set))
+      })
+        .filter(set => fieldWorkerCanAccessJob(req, set.jobId))
+        .map(set => recordForOperator(req, set))
     };
   });
 });
@@ -7064,6 +7134,9 @@ app.post('/api/ledger/upload', async (req, res) => {
       authorizePayload(payload) {
         const requestedJobId = payload.jobId || payload.job_id || payload.ledgerJobId || payload.ledger_job_id;
         const requestedOpportunityId = payload.opportunityId || payload.opportunity_id;
+        if (payload.storageRef || payload.storage_ref || payload.url) {
+          throw new UploadRequestError(400, 'client_storage_reference_forbidden', 'Evidence storage references are assigned only by Contractor.AI storage.');
+        }
         if (!requestedJobId && !requestedOpportunityId) {
           throw new UploadRequestError(400, 'ledger_job_required', 'Evidence uploads must identify an operating-ledger job or opportunity.');
         }
@@ -8145,12 +8218,37 @@ app.get('/api/operations/audit-integrity', (req, res) => {
   });
 });
 
-async function operationalReadiness() {
-  const storageVerification = await verifyEvidenceStorage();
-  const runtime = runtimeConfiguration({ storageVerification });
-  const ledgerDiagnostics = getLedgerDiagnostics();
-  const status = runtime.ready && ledgerDiagnostics.valid ? 'ready' : 'attention';
-  return { status, runtime, ledgerDiagnostics, storageVerification };
+let operationalReadinessSnapshot = null;
+let operationalReadinessRefreshPromise = null;
+
+async function operationalReadiness(options = {}) {
+  const snapshotAgeMs = Date.now() - Date.parse(operationalReadinessSnapshot?.checkedAt || '');
+  if (
+    options.cached === true
+    && operationalReadinessSnapshot
+    && Number.isFinite(snapshotAgeMs)
+    && snapshotAgeMs < operationalReadinessCacheTtlMs
+  ) return operationalReadinessSnapshot;
+  if (operationalReadinessRefreshPromise) return operationalReadinessRefreshPromise;
+  operationalReadinessRefreshPromise = (async () => {
+    const storageVerification = await verifyEvidenceStorage();
+    const runtime = runtimeConfiguration({ storageVerification });
+    const ledgerDiagnostics = getLedgerDiagnostics();
+    const status = runtime.ready && ledgerDiagnostics.valid ? 'ready' : 'attention';
+    operationalReadinessSnapshot = {
+      status,
+      runtime,
+      ledgerDiagnostics,
+      storageVerification,
+      checkedAt: new Date().toISOString()
+    };
+    return operationalReadinessSnapshot;
+  })();
+  try {
+    return await operationalReadinessRefreshPromise;
+  } finally {
+    operationalReadinessRefreshPromise = null;
+  }
 }
 
 app.get('/api/operations/capabilities', asyncHandler(async (req, res) => {
@@ -9081,6 +9179,16 @@ app.post('/api/operations/reset-qa', (req, res) => {
 
 app.get('/api/readiness', asyncHandler(async (req, res) => {
   const { status, runtime, ledgerDiagnostics } = await operationalReadiness();
+  if (req.operator?.role === 'field_worker') {
+    return res.status(status === 'ready' ? 200 : 503).json({
+      status,
+      requestId: req.requestId,
+      checkedAt: operationalReadinessSnapshot.checkedAt,
+      checks: {
+        service: status === 'ready' ? 'ready' : 'attention'
+      }
+    });
+  }
   return res.status(status === 'ready' ? 200 : 503).json({
     status,
     runtime,
@@ -9105,11 +9213,11 @@ app.get('/api/readiness', asyncHandler(async (req, res) => {
 }));
 
 app.get('/api/health/ready', asyncHandler(async (req, res) => {
-  const { status, runtime, ledgerDiagnostics, storageVerification } = await operationalReadiness();
+  const { status, runtime, ledgerDiagnostics, storageVerification, checkedAt } = await operationalReadiness({ cached: true });
   return res.status(status === 'ready' ? 200 : 503).json({
     status,
     requestId: req.requestId,
-    checkedAt: new Date().toISOString(),
+    checkedAt,
     checks: {
       configuration: runtime.ready ? 'ready' : 'attention',
       database: ledgerDiagnostics.valid ? 'ready' : 'attention',
@@ -9122,6 +9230,19 @@ app.get('/api/health/ready', asyncHandler(async (req, res) => {
 app.get('/api/health', (req, res) => {
   const ledgerDiagnostics = getLedgerDiagnostics();
   const runtime = runtimeConfiguration();
+  if (req.operator?.role === 'field_worker') {
+    return res.json({
+      status: ledgerDiagnostics.valid && runtime.ready ? 'healthy' : 'degraded',
+      requestId: req.requestId,
+      timestamp: new Date().toISOString(),
+      version: packageMetadata.version,
+      services: {
+        database: ledgerDiagnostics.valid ? 'operational' : 'attention',
+        evidenceStorage: runtime.evidenceStorage.status,
+        ledger: ledgerDiagnostics.valid ? 'operational' : 'attention'
+      }
+    });
+  }
   res.json({
     status: ledgerDiagnostics.valid && runtime.ready ? 'healthy' : 'degraded',
     requestId: req.requestId,
@@ -9183,7 +9304,7 @@ app.use((error, req, res, next) => {
   log(handledRequestError ? 'warn' : 'error', handledRequestError ? 'request_body_rejected' : 'unhandled_request_error', {
     requestId: req.requestId,
     method: req.method,
-    path: req.originalUrl,
+    path: logSafeRequestPath(req),
     code: invalidJson ? 'invalid_json' : requestTooLarge ? 'request_body_too_large' : 'internal_error',
     ...(handledRequestError ? {} : { error: serializeError(error) })
   });
@@ -9205,7 +9326,7 @@ app.use((error, req, res, next) => {
 async function startDirectServer(options = {}) {
   const storageVerification = await verifyEvidenceStorage({ force: true });
   const startupRuntime = runtimeConfiguration({ storageVerification });
-  if (isProduction && !startupRuntime.ready) {
+  if ((isProduction || runtimeMode === 'hosted') && !startupRuntime.ready) {
     log('error', 'production_runtime_not_ready', { issues: startupRuntime.issues.map(issue => issue.code) });
     await shutdownRuntime({ signal: 'startup_not_ready' });
     const error = new Error('Contractor.AI production runtime is not ready.');

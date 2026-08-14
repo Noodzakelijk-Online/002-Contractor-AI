@@ -769,8 +769,8 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
   if (!/push:\s*\n\s+branches:\s*\n\s+- main/.test(workflow)) {
     failures.push('CI push verification must be limited to main so pull request branches do not run duplicate suites.');
   }
-  if (!/CONTRACTOR_AI_POSTGRES_TEST_URL:.*sslmode=require/.test(workflow)) {
-    failures.push('CI PostgreSQL contract must run with sslmode=require.');
+  if (!/CONTRACTOR_AI_POSTGRES_TEST_URL:.*sslmode=verify-full/.test(workflow) || !workflow.includes('NODE_EXTRA_CA_CERTS')) {
+    failures.push('CI PostgreSQL contract must run with sslmode=verify-full and an explicit trusted CA.');
   }
   if (!workflow.includes("SHOW ssl")) failures.push('CI workflow must verify PostgreSQL TLS is active.');
   for (const windowsRequirement of ['windows-standalone:', 'runs-on: windows-latest', 'npm run package:windows', 'npm run test:windows-package', 'actions/upload-artifact@v7']) {

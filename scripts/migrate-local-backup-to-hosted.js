@@ -677,8 +677,8 @@ async function runCli() {
   const databaseUrl = String(argumentsMap['database-url'] || process.env.CONTRACTOR_AI_DATABASE_URL || '').trim();
   if (!databaseUrl) throw new Error('Set CONTRACTOR_AI_DATABASE_URL to the empty hosted PostgreSQL migration target.');
   const connection = resolvePostgresConnectionOptions(databaseUrl);
-  if (!['require', 'verify-full'].includes(connection.sslMode)) {
-    throw new Error('Hosted migration requires PostgreSQL TLS with sslmode=require or sslmode=verify-full.');
+  if (connection.sslMode !== 'verify-full') {
+    throw new Error('Hosted migration requires PostgreSQL certificate and hostname verification with sslmode=verify-full.');
   }
   const storage = createHostedEvidenceStorageFromEnvironment();
   const result = await migrateLocalBackupToHosted({

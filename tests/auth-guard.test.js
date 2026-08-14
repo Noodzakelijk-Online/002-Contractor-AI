@@ -80,6 +80,14 @@ test('local mode assigns a trusted audit actor and does not retain a submitted a
   });
 
   await withServer(app, async baseUrl => {
+    const foreignOrigin = await request(baseUrl, '/api/ledger/intake', {
+      method: 'POST',
+      headers: { Origin: 'https://attacker.invalid', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: 'Rejected local browser mutation', client: { name: 'Foreign origin' } })
+    });
+    assert.equal(foreignOrigin.response.status, 403);
+    assert.equal(foreignOrigin.body.error.code, 'local_origin_forbidden');
+
     const intake = await request(baseUrl, '/api/ledger/intake', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -365,6 +373,14 @@ test('approved client portal tokens work without exposing the authenticated dash
     assert.equal(portal.response.status, 200);
     assert.equal(portal.body.job.title, 'Authenticated portal job');
 
+    const portalPreference = await request(baseUrl, `/api/client-portal/${access.body.access.portalToken}/preferences`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ locale: 'nl-NL' })
+    });
+    assert.equal(portalPreference.response.status, 200);
+    assert.equal(portalPreference.body.preferences.locale, 'nl-NL');
+
     const portalResponse = await request(
       baseUrl,
       `/api/client-portal/${access.body.access.portalToken}/selections/${selection.body.clientSelection.id}/responses`,
@@ -507,6 +523,17 @@ test('role tokens limit operator mutations to their authorized ledger workflow',
     assert.equal(fieldSession.body.operator.capabilities.clientSuccess, false);
     assert.equal(fieldSession.body.operator.capabilities.fieldEvidence, true);
     assert.equal(fieldSession.body.operator.worker.id, 'field-worker-role-scope');
+
+    const fieldHealth = await request(baseUrl, '/api/health', { headers: fieldHeaders });
+    assert.equal(fieldHealth.response.status, 200);
+    assert.equal(Object.hasOwn(fieldHealth.body, 'runtime'), false);
+    assert.equal(Object.hasOwn(fieldHealth.body, 'diagnostics'), false);
+    assert.equal(Object.hasOwn(fieldHealth.body, 'migrations'), false);
+    const fieldReadiness = await request(baseUrl, '/api/readiness', { headers: fieldHeaders });
+    assert.equal(fieldReadiness.response.status, 200);
+    assert.equal(Object.hasOwn(fieldReadiness.body, 'runtime'), false);
+    assert.equal(Object.hasOwn(fieldReadiness.body, 'deployment'), false);
+    assert.equal(Object.hasOwn(fieldReadiness.body, 'ledger'), false);
 
     const officeSession = await request(baseUrl, '/api/session', { headers: officeHeaders });
     assert.equal(officeSession.response.status, 200);

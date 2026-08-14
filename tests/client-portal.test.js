@@ -105,6 +105,25 @@ test('client portal access is approval-gated, scoped, auditable, and revocable',
   assert.ok(portalLogs.some(line => line.includes('/api/client-portal/[redacted]')));
   assert.equal(portalLogs.some(line => line.includes(created.body.access.portalToken)), false);
 
+  const rejectedBodyLogs = [];
+  const originalWarn = console.warn;
+  console.log = (...args) => rejectedBodyLogs.push(args.join(' '));
+  console.warn = (...args) => rejectedBodyLogs.push(args.join(' '));
+  let rejectedBody;
+  try {
+    rejectedBody = await request(baseUrl, `/api/client-portal/${created.body.access.portalToken}/messages`, {
+      method: 'POST',
+      body: '{'
+    });
+  } finally {
+    console.log = originalLog;
+    console.warn = originalWarn;
+  }
+  assert.equal(rejectedBody.response.status, 400);
+  assert.equal(rejectedBody.body.error.code, 'invalid_json');
+  assert.ok(rejectedBodyLogs.some(line => line.includes('/api/client-portal/[redacted]/messages')));
+  assert.equal(rejectedBodyLogs.some(line => line.includes(created.body.access.portalToken)), false);
+
   const portalPreference = await request(baseUrl, `/api/client-portal/${created.body.access.portalToken}/preferences`, {
     method: 'PATCH',
     body: JSON.stringify({ locale: 'nl-NL' })

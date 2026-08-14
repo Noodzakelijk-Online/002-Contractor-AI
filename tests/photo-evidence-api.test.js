@@ -24,6 +24,11 @@ const tokens = {
       workerId: otherWorkerId,
       token: 'photo-evidence-api-other-field-token-at-least-32-characters',
       jobIds: [jobId]
+    },
+    {
+      id: 'photo-evidence-api-job-scoped',
+      token: 'photo-evidence-api-job-scoped-token-at-least-32-characters',
+      jobIds: [jobId]
     }
   ]
 };
@@ -136,14 +141,62 @@ test('photo-evidence API atomically binds private uploads to assigned-worker pha
   assert.equal(scheduled.response.status, 201);
   const setId = scheduled.body.photoEvidenceSet.id;
 
+  const foreignJobId = 'photo-evidence-api-foreign-job';
+  const foreignIntake = await request(baseUrl, '/api/ledger/intake', tokens.office_operator, {
+    method: 'POST',
+    body: JSON.stringify({
+      ledgerJobId: foreignJobId,
+      title: 'Photo evidence foreign project',
+      status: 'in_progress',
+      client: { name: 'Photo evidence foreign client' },
+      assignAutomatically: false
+    })
+  });
+  assert.equal(foreignIntake.response.status, 201);
+  const foreignAssignment = await request(baseUrl, `/api/ledger/jobs/${foreignJobId}/assignments`, tokens.office_operator, {
+    method: 'POST',
+    body: JSON.stringify({ workerId, role: 'Installer', status: 'planned' })
+  });
+  assert.equal(foreignAssignment.response.status, 201);
+  const foreignTask = await request(baseUrl, `/api/ledger/jobs/${foreignJobId}/tasks`, tokens.office_operator, {
+    method: 'POST',
+    body: JSON.stringify({
+      title: 'Install foreign roof outlet waterproofing',
+      status: 'in_progress',
+      assigneeId: workerId,
+      priority: 'high'
+    })
+  });
+  assert.equal(foreignTask.response.status, 201);
+  const foreignScheduled = await request(baseUrl, `/api/ledger/jobs/${foreignJobId}/photo-evidence`, tokens.office_operator, {
+    method: 'POST',
+    body: JSON.stringify({
+      entryKey: 'photo-evidence-api-foreign-schedule-0001',
+      taskId: foreignTask.body.task.id,
+      assignmentId: foreignAssignment.body.assignment.id,
+      assignedWorkerId: workerId,
+      title: 'Foreign roof outlet evidence',
+      workLocation: 'Foreign site / roof',
+      requiredPhases: ['before', 'during', 'after']
+    })
+  });
+  assert.equal(foreignScheduled.response.status, 201);
+
   const assignedList = await request(baseUrl, '/api/ledger/photo-evidence', fieldToken);
   assert.equal(assignedList.response.status, 200);
-  assert.deepEqual(assignedList.body.photoEvidenceSets.map(set => set.id), [setId]);
-  assert.equal(assignedList.body.photoEvidenceSets[0].entryKey, undefined);
-  assert.equal(assignedList.body.photoEvidenceSets[0].latestApproval, undefined);
+  assert.deepEqual(
+    assignedList.body.photoEvidenceSets.map(set => set.id).sort(),
+    [setId, foreignScheduled.body.photoEvidenceSet.id].sort()
+  );
+  const assignedSet = assignedList.body.photoEvidenceSets.find(set => set.id === setId);
+  assert.equal(assignedSet.entryKey, undefined);
+  assert.equal(assignedSet.latestApproval, undefined);
   const otherList = await request(baseUrl, '/api/ledger/photo-evidence', otherFieldToken);
   assert.equal(otherList.response.status, 200);
   assert.equal(otherList.body.photoEvidenceSets.length, 0);
+  const jobScopedList = await request(baseUrl, '/api/ledger/photo-evidence', tokens.field_worker[2]);
+  assert.equal(jobScopedList.response.status, 200);
+  assert.deepEqual(jobScopedList.body.photoEvidenceSets.map(set => set.id), [setId]);
 
   const captureTimes = [
     new Date(Date.now() - 3 * 60 * 1000).toISOString(),

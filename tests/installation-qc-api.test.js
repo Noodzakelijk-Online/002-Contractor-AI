@@ -24,6 +24,11 @@ const tokens = {
       workerId: otherWorkerId,
       token: 'installation-qc-api-other-field-token-at-least-32-characters',
       jobIds: [jobId]
+    },
+    {
+      id: 'installation-qc-api-job-scoped',
+      token: 'installation-qc-api-job-scoped-token-at-least-32-characters',
+      jobIds: [jobId]
     }
   ]
 };
@@ -167,12 +172,62 @@ test('installation QC API enforces assigned-worker capture, authenticated approv
   assert.equal(scheduled.response.status, 201);
   assert.equal(scheduled.body.inspection.installationQc.assignedWorkerId, workerId);
 
+  const foreignJobId = 'installation-qc-api-foreign-job';
+  const foreignIntake = await request(baseUrl, '/api/ledger/intake', tokens.office_operator, {
+    method: 'POST',
+    body: JSON.stringify({
+      ledgerJobId: foreignJobId,
+      title: 'Installation QC foreign project',
+      status: 'in_progress',
+      client: { name: 'Installation QC foreign client' },
+      assignAutomatically: false
+    })
+  });
+  assert.equal(foreignIntake.response.status, 201);
+  const foreignAssignment = await request(baseUrl, `/api/ledger/jobs/${foreignJobId}/assignments`, tokens.office_operator, {
+    method: 'POST',
+    body: JSON.stringify({ workerId, role: 'Installer', status: 'planned' })
+  });
+  assert.equal(foreignAssignment.response.status, 201);
+  const foreignTask = await request(baseUrl, `/api/ledger/jobs/${foreignJobId}/tasks`, tokens.office_operator, {
+    method: 'POST',
+    body: JSON.stringify({
+      title: 'Install foreign facade panel',
+      status: 'in_progress',
+      assigneeId: workerId,
+      priority: 'high'
+    })
+  });
+  assert.equal(foreignTask.response.status, 201);
+  const foreignScheduled = await request(baseUrl, `/api/ledger/jobs/${foreignJobId}/inspection-checklists`, tokens.office_operator, {
+    method: 'POST',
+    body: JSON.stringify({
+      templateId: template.body.template.id,
+      title: 'Foreign facade panel hold point',
+      entryKey: 'installation-qc-api-foreign-schedule-0001',
+      taskId: foreignTask.body.task.id,
+      assignmentId: foreignAssignment.body.assignment.id,
+      assignedWorkerId: workerId,
+      workLocation: 'Foreign site / Level 1',
+      installationStage: 'pre_concealment',
+      controlPoint: 'hold',
+      referenceBasis: 'Foreign project requirement.'
+    })
+  });
+  assert.equal(foreignScheduled.response.status, 201);
+
   const assignedList = await request(baseUrl, '/api/ledger/installation-qc', fieldToken);
   assert.equal(assignedList.response.status, 200);
-  assert.deepEqual(assignedList.body.controls.map(control => control.inspectionId), [scheduled.body.inspection.id]);
+  assert.deepEqual(
+    assignedList.body.controls.map(control => control.inspectionId).sort(),
+    [scheduled.body.inspection.id, foreignScheduled.body.inspection.id].sort()
+  );
   const otherList = await request(baseUrl, '/api/ledger/installation-qc', otherFieldToken);
   assert.equal(otherList.response.status, 200);
   assert.equal(otherList.body.controls.length, 0);
+  const jobScopedList = await request(baseUrl, '/api/ledger/installation-qc', tokens.field_worker[2]);
+  assert.equal(jobScopedList.response.status, 200);
+  assert.deepEqual(jobScopedList.body.controls.map(control => control.inspectionId), [scheduled.body.inspection.id]);
 
   const responses = [
     {

@@ -27,7 +27,7 @@ jobs:
           --health-timeout 5s
           --health-retries 10
     env:
-      CONTRACTOR_AI_POSTGRES_TEST_URL: postgresql://contractor_ai:contractor-ai-ci-password@127.0.0.1:5432/contractor_ai?sslmode=require
+      CONTRACTOR_AI_POSTGRES_TEST_URL: postgresql://contractor_ai:contractor-ai-ci-password@localhost:5432/contractor_ai?sslmode=verify-full
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -44,7 +44,10 @@ jobs:
           tls_dir="$(mktemp -d)"
           trap 'rm -rf "$tls_dir"' EXIT
           openssl req -new -x509 -nodes -days 1 -subj '/CN=localhost' \
+            -addext 'subjectAltName=DNS:localhost,IP:127.0.0.1' \
             -keyout "$tls_dir/server.key" -out "$tls_dir/server.crt"
+          cp "$tls_dir/server.crt" "$GITHUB_WORKSPACE/.ci-postgres-ca.crt"
+          echo "NODE_EXTRA_CA_CERTS=$GITHUB_WORKSPACE/.ci-postgres-ca.crt" >> "$GITHUB_ENV"
           docker cp "$tls_dir/server.key" "$container_id:/tmp/contractor-ai-server.key"
           docker cp "$tls_dir/server.crt" "$container_id:/tmp/contractor-ai-server.crt"
           docker exec --user root "$container_id" \
