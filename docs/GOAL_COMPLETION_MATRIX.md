@@ -57,21 +57,21 @@ manual evidence is recorded in `FINAL_VERIFICATION_REPORT.md`.
 | 040 | Backend test suite | Implemented | broad Node unit/integration suite across ledger and API contracts |
 | 041 | Frontend and component test suite | Implemented | dedicated Vitest/Testing Library behavioral gate plus full browser workflows and source assertions |
 | 042 | Worker/job test suite | Implemented | scheduler lease, idempotency, failure and suspension tests |
-| 043 | End-to-end workflow tests | Implemented | 90 Playwright operator/client/field/framework/onboarding/team-access/privacy/accessibility/safety/maintenance/recovery flows plus API vertical slices |
+| 043 | End-to-end workflow tests | Implemented | 94 Playwright operator/client/field/framework/onboarding/team-access/privacy/accessibility/safety/maintenance/recovery/localization flows plus API vertical slices |
 | 044 | Acceptance test matrix | Implemented | `ACCEPTANCE_TESTS.md` maps 34 release outcomes |
 | 045 | Adversarial break-the-app tests | Implemented | source drift, replay, auth, rate, tamper, malformed evidence and conflict tests |
 | 046 | Cross-user isolation tests | Implemented | roles, assignment/resource ownership and portal token boundaries |
 | 047 | File safety and path traversal tests | Implemented | evidence, backup, package, upload, symlink/path/checksum cases |
 | 048 | Provider failure simulation | Implemented | unavailable/unverified/ambiguous provider states fail closed in tests |
 | 049 | Accessibility review | Partial | pinned axe gate reports zero selected WCAG A/AA violations across sign-in, all primary workspaces, representative dialogs, mobile navigation, and the mobile/desktop client portal; independent assistive-technology and user audit remains external |
-| 050 | Responsive and browser compatibility | Implemented | 90 desktop/mobile operator, client and field Chromium tests in isolated batches |
+| 050 | Responsive and browser compatibility | Implemented | 94 desktop/mobile operator, client and field Chromium tests in isolated batches |
 | 051 | Performance baseline and indexing | Implemented | bundle budgets plus deterministic 63,500-row Node 22 benchmark, hot-queue indexes, p50/p95/resource thresholds and CI report |
 | 052 | Large dataset and pagination testing | Implemented | 5,000 jobs, 20,000 tasks, 2,500 opportunities, 5,000 approvals and 25,000 chained audit events verify bounded lists, historical search and untruncated aggregates |
 | 053 | Backup and restore procedures | Implemented | v2 DB/evidence manifests, checksums, validation, session revocation, runbook |
 | 054 | Data reconciliation and repair commands | Partial | integrity/reconciliation/restore/migration tools exist; no generic mutation repair CLI |
 | 055 | Product analytics local-first design | Implemented | retained contractor scorecard and operating metrics; no forced external telemetry |
 | 056 | SaaS readiness without forced billing | Implemented | portable hosted contract with local-first mode; billing is not required |
-| 057 | Internationalization and Dutch/English readiness | Partial | persisted per-operator NL/EN preference, locale-aware formatting, complete token-scoped client portal, and bilingual Performance Scorecard, Framework Register, market-fit, bid/no-bid, site-survey, WBS/quantity takeoff, labour burden/overhead/unit-rate estimating, commercial scope/allowances, project risk/premortem, fixed-price-versus-regie decisions, estimates/quotes/acceptance, formal variations, project controls for RFIs/submittals/revisions/transmittals/meetings, daily start/EOD controls, production baselines/output/reversals, regiewerk tickets/acknowledgement/conversion, crew-capacity/two-week planning, Last Planner, 5S, LMRA, installation/QC inspections, photo evidence, punch/warranty/aftercare/feedback closeout, client-success handover, and 13-week cash-flow controls; remaining specialist and parent workspaces still contain English-only copy |
+| 057 | Internationalization and Dutch/English readiness | Partial | persisted per-operator NL/EN preference, locale-aware formatting, complete token-scoped client portal, and bilingual Performance Scorecard, Framework Register, market-fit, bid/no-bid, site-survey, WBS/quantity takeoff, labour burden/overhead/unit-rate estimating, commercial scope/allowances, project risk/premortem, fixed-price-versus-regie decisions, estimates/quotes/acceptance, formal variations, job setup coverage, critical-path work planning, project controls for RFIs/submittals/revisions/transmittals/meetings, daily start/EOD controls, production baselines/output/reversals, regiewerk tickets/acknowledgement/conversion, crew-capacity/two-week planning, Last Planner, 5S, LMRA, installation/QC inspections, photo evidence, punch/warranty/aftercare/feedback closeout, client-success handover, and 13-week cash-flow controls; remaining specialist workspaces still contain English-only copy |
 | 058 | Feature flags and rollout controls | Partial | provider/scheduler/storage controls and owner stop; no generic flag service |
 | 059 | Formal state machines | Partial | guarded explicit statuses/transitions across domains; not one central state DSL |
 | 060 | Domain model specification | Implemented | migrations, ledger methods, README safety model and API contracts |
@@ -90,7 +90,7 @@ manual evidence is recorded in `FINAL_VERIFICATION_REPORT.md`.
 | 073 | UI action audit | Implemented | `UI_ACTION_AUDIT.md` maps actions and residual gaps |
 | 074 | Backend endpoint usage audit | Implemented | `API_USAGE_AUDIT.md`, route/call-site counts and release assertions |
 | 075 | Documentation truthfulness audit | Implemented | limitations, non-certification and pending verification are explicit |
-| 076 | Technical debt register | Implemented | technical audit records module size, remaining specialist/parent-workspace i18n, autosave and provider-bound load acceptance debt; qualification, bid decision, site survey, project controls, crew planning, quality, closeout, client-success and cash-flow practical-core controls are now bilingual |
+| 076 | Technical debt register | Implemented | technical audit records module size, remaining specialist-workspace i18n, autosave and provider-bound load acceptance debt; setup coverage, critical-path work planning, qualification, bid decision, site survey, project controls, crew planning, quality, closeout, client-success and cash-flow practical-core controls are now bilingual |
 | 077 | Bug hunt log | Implemented | worklog records findings, tests and scope decisions |
 | 078 | Red-team review loop one | Implemented | side-effect/provider/source-currentness boundaries rechecked |
 | 079 | Red-team review loop two | Implemented | auth/privacy/debug/support boundaries rechecked |

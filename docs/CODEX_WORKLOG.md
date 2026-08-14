@@ -366,3 +366,22 @@ Node 22 x64 packaging. Exact counts and external boundaries are retained in
   90 Chromium workflows in 490.5 seconds, release/build/bundle at 394,091 total
   gzip bytes, HAI fail-closed contract, production benchmark, hardened container,
   and Node 22.23.2 Windows package verification.
+
+## 2026-08-14 - Job setup and critical-path planning bilingual pass
+
+- Passed the persisted operator locale into job setup coverage and work planning,
+  including every ledger-generated capability label, autonomy boundary, baseline
+  state, task action, dependency control, tooltip, and accessible name.
+- Preserved retained job, task, assignee, and evidence text verbatim through a
+  Dutch-to-English task-creation round trip and API readback.
+- Fixed lowercase task priorities that remained English in Dutch mode and replaced
+  the cramped four-column mobile job summary with a contained two-by-two layout.
+- Removed a browser-suite batch-order assumption by verifying QA archive counts
+  against the current complete server preview rather than a four-record constant.
+- In-app Browser QA confirmed localized setup/planning copy, retained mixed-language
+  task titles, exact mobile containment, and zero inspected console errors.
+- Current-source gates pass: 10 frontend tests, 534 Node tests (498 passed and 36
+  PostgreSQL/environment skips), all 94 Chromium workflows in 24 isolated batches,
+  2,495 unique operator translation keys, release/HAI/lint/build/bundle at 434,974
+  total gzip bytes, the 57,500-row production benchmark, hardened container, and
+  Node 22.23.2 Windows standalone verification.

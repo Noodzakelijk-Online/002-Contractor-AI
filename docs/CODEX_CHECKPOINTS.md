@@ -3,6 +3,21 @@
 This file is a compact resume boundary. A future implementation pass should verify
 the repository rather than treating these statements as current by assumption.
 
+## CP-19 Bilingual setup and critical-path planning
+
+- Locale wiring: persisted operator locale reaches job setup coverage and work-plan
+  controls; all 91 capability/catalog labels and every planning action, status,
+  form label, tooltip, and accessible name have Dutch presentation
+- Retained data: job titles, task titles, assignees, and evidence remain verbatim
+  across NL/EN round trips; only controlled catalog and enum copy is translated
+- Responsive UI: the job summary uses a two-by-two narrow-screen grid with bounded
+  wrapping; job setup and work-plan sections retain exact viewport containment
+- Test isolation: QA archive verification consumes current server preview counts,
+  so bounded browser batch changes cannot create false hard-coded count failures
+- Verification: 10 frontend tests, 534 Node tests, 94 Chromium workflows in 24
+  isolated batches, release/HAI/lint/build/bundle, production benchmark, hardened
+  container, and Node 22.23.2 Windows standalone gates pass
+
 ## CP-18 Bounded draft recovery and frontend gate
 
 - Recovery: central operator and client-portal form drafts survive reload inside

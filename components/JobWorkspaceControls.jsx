@@ -4957,7 +4957,8 @@ function AutomationControl({
   )
 }
 
-function CapabilitySetupControl({ job, canCoordinate, submitting, onApply }) {
+function CapabilitySetupControl({ job, locale = 'en-GB', canCoordinate, submitting, onApply }) {
+  const t = (key, variables = {}) => operatorText(locale, key, variables)
   const missingRequirements = useMemo(() => {
     const byKey = new Map()
     for (const capability of job.capabilities || EMPTY_LIST) {
@@ -5005,8 +5006,8 @@ function CapabilitySetupControl({ job, canCoordinate, submitting, onApply }) {
       <div className="section-heading capability-setup-heading">
         <Gauge size={18} />
         <div>
-          <h3>Job setup coverage</h3>
-          <p>Prepare internal setup records while observed facts and commitments stay operator-controlled.</p>
+          <h3>{t('Job setup coverage')}</h3>
+          <p>{t('Prepare internal setup records while observed facts and commitments stay operator-controlled.')}</p>
         </div>
         {canCoordinate && safeGaps.length ? (
           <button
@@ -5016,33 +5017,33 @@ function CapabilitySetupControl({ job, canCoordinate, submitting, onApply }) {
             onClick={() => setSelectedKeys(selectedKeys.length === safeGaps.length ? [] : safeGaps.map((requirement) => requirement.key))}
           >
             <Check size={15} />
-            {selectedKeys.length === safeGaps.length ? 'Clear selection' : 'Select safe drafts'}
+            {selectedKeys.length === safeGaps.length ? t('Clear selection') : t('Select safe drafts')}
           </button>
         ) : null}
       </div>
 
-      <div className="capability-setup-metrics" aria-label="Job setup coverage summary">
+      <div className="capability-setup-metrics" aria-label={t('Job setup coverage summary')}>
         <div>
-          <span>Coverage</span>
+          <span>{t('Coverage')}</span>
           <strong>{job.capabilitySummary?.averageCoverage || 0}%</strong>
         </div>
         <div>
-          <span>Ready groups</span>
+          <span>{t('Ready groups')}</span>
           <strong>{job.capabilitySummary?.ready || 0} / {job.capabilities?.length || 0}</strong>
         </div>
         <div>
-          <span>Safe drafts</span>
+          <span>{t('Safe drafts')}</span>
           <strong>{safeGaps.length}</strong>
         </div>
         <div>
-          <span>Manual gaps</span>
+          <span>{t('Manual gaps')}</span>
           <strong>{manualGaps.length}</strong>
         </div>
       </div>
 
       {safeGaps.length ? (
         <fieldset className="capability-safe-drafts">
-          <legend>Internal setup drafts</legend>
+          <legend>{t('Internal setup drafts')}</legend>
           {safeGaps.map((requirement) => (
             <label className="capability-gap-option" key={requirement.key}>
               <input
@@ -5052,22 +5053,22 @@ function CapabilitySetupControl({ job, canCoordinate, submitting, onApply }) {
                 onChange={() => toggleRequirement(requirement.key)}
               />
               <span>
-                <strong>{requirement.label}</strong>
-                <small>{requirement.capabilityLabels.join(' / ')}</small>
+                <strong>{t(requirement.label)}</strong>
+                <small>{requirement.capabilityLabels.map((label) => t(label)).join(' / ')}</small>
               </span>
-              <span className="tag tag-green">Draft only</span>
+              <span className="tag tag-green">{t('Draft only')}</span>
             </label>
           ))}
         </fieldset>
       ) : (
         <p className="workflow-note" data-testid="capability-safe-complete">
-          All eligible internal setup scaffolds are retained for this job.
+          {t('All eligible internal setup scaffolds are retained for this job.')}
         </p>
       )}
 
       {canCoordinate && safeGaps.length ? (
         <div className="capability-setup-actions">
-          <span>{selectedKeys.length} selected</span>
+          <span>{t('{count} selected', { count: selectedKeys.length })}</span>
           <button
             type="button"
             className="primary-button"
@@ -5076,7 +5077,7 @@ function CapabilitySetupControl({ job, canCoordinate, submitting, onApply }) {
             onClick={applySelected}
           >
             <ClipboardList size={15} />
-            {submitting ? 'Retaining...' : 'Retain selected drafts'}
+            {submitting ? t('Retaining...') : t('Retain selected drafts')}
           </button>
         </div>
       ) : null}
@@ -5085,16 +5086,18 @@ function CapabilitySetupControl({ job, canCoordinate, submitting, onApply }) {
         <details className="capability-manual-gaps">
           <summary>
             <LockKeyhole size={15} />
-            Manual evidence and commitments ({manualGaps.length})
+            {t('Manual evidence and commitments ({count})', { count: manualGaps.length })}
           </summary>
           <div>
             {manualGaps.map((requirement) => (
               <article key={requirement.key} data-testid={`manual-capability-${requirement.key}`}>
                 <span>
-                  <strong>{requirement.label}</strong>
-                  <small>{requirement.automationReason}</small>
+                  <strong>{t(requirement.label)}</strong>
+                  <small>{t(requirement.automationReason)}</small>
                 </span>
-                <span className="tag">{requirement.automationPolicy === 'manual_commitment' ? 'Verify commitment' : 'Source evidence'}</span>
+                <span className="tag">
+                  {requirement.automationPolicy === 'manual_commitment' ? t('Verify commitment') : t('Source evidence')}
+                </span>
               </article>
             ))}
           </div>
@@ -5106,6 +5109,7 @@ function CapabilitySetupControl({ job, canCoordinate, submitting, onApply }) {
 
 function WorkPlanControl({
   job,
+  locale = 'en-GB',
   canCoordinate,
   canApprove,
   fieldScoped,
@@ -5123,6 +5127,7 @@ function WorkPlanControl({
   onRequestBaseline,
   onOpenApprovals,
 }) {
+  const t = (key, variables = {}) => operatorText(locale, key, variables)
   const fallbackStartRef = useRef(new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString())
   const initialStart =
     job.scheduleControl?.pendingBaseline?.plannedStart ||
@@ -5161,12 +5166,12 @@ function WorkPlanControl({
   const pendingBaseline = job.scheduleControl?.pendingBaseline || null
   const activeBaseline = job.scheduleControl?.activeBaseline || null
   const baselineState = pendingBaseline
-    ? { label: `Baseline v${pendingBaseline.versionNumber} pending`, className: 'tag-amber' }
+    ? { label: t('Baseline v{version} pending', { version: pendingBaseline.versionNumber }), className: 'tag-amber' }
     : job.scheduleControl?.baselineStale
-      ? { label: `Baseline v${activeBaseline?.versionNumber || '?'} stale`, className: 'tag-amber' }
+      ? { label: t('Baseline v{version} stale', { version: activeBaseline?.versionNumber || '?' }), className: 'tag-amber' }
       : job.scheduleControl?.baselineCurrent
-        ? { label: `Baseline v${activeBaseline?.versionNumber} current`, className: 'tag-green' }
-        : { label: 'No approved baseline', className: '' }
+        ? { label: t('Baseline v{version} current', { version: activeBaseline?.versionNumber }), className: 'tag-green' }
+        : { label: t('No approved baseline'), className: '' }
   const totalDuration = activeTasks.reduce((sum, task) => sum + Number(task.durationHours || 0), 0)
 
   async function calculate(event) {
@@ -5197,29 +5202,32 @@ function WorkPlanControl({
       <div className="section-heading work-plan-heading">
         <GitBranch size={18} />
         <div>
-          <h3>Work plan</h3>
+          <h3>{t('Work plan')}</h3>
           <p>
-            {activeTasks.length} active / {dependencies.length} dependencies
+            {t('{active} active / {dependencies} dependencies', {
+              active: activeTasks.length,
+              dependencies: dependencies.length,
+            })}
           </p>
         </div>
         <span className={`tag ${baselineState.className}`}>{baselineState.label}</span>
       </div>
 
-      <div className="work-plan-metrics" aria-label="Work plan summary">
+      <div className="work-plan-metrics" aria-label={t('Work plan summary')}>
         <div>
-          <span>Active work</span>
+          <span>{t('Active work')}</span>
           <strong>{activeTasks.length}</strong>
         </div>
         <div>
-          <span>Task hours</span>
+          <span>{t('Task hours')}</span>
           <strong>{roundDisplay(totalDuration)}h</strong>
         </div>
         <div>
-          <span>Plan span</span>
-          <strong>{plan?.ready ? `${roundDisplay(plan.projectDurationHours)}h` : 'Incomplete'}</strong>
+          <span>{t('Plan span')}</span>
+          <strong>{plan?.ready ? `${roundDisplay(plan.projectDurationHours)}h` : t('Incomplete')}</strong>
         </div>
         <div>
-          <span>Critical tasks</span>
+          <span>{t('Critical tasks')}</span>
           <strong>{plan?.criticalPathTaskIds?.length || 0}</strong>
         </div>
       </div>
@@ -5227,16 +5235,16 @@ function WorkPlanControl({
       {canCoordinate ? (
         <form className="form-grid compact-form task-create-form work-plan-task-form" onSubmit={onCreateTask}>
           <label className="form-span">
-            Task title
+            {t('Task title')}
             <input
               required
               value={taskDraft.title}
               onChange={(event) => setTaskDraft({ ...taskDraft, title: event.target.value })}
-              placeholder="Work item"
+              placeholder={t('Work item')}
             />
           </label>
           <label>
-            Duration (hours)
+            {t('Duration (hours)')}
             <input
               required
               type="number"
@@ -5248,25 +5256,25 @@ function WorkPlanControl({
             />
           </label>
           <label>
-            Priority
+            {t('Priority')}
             <select value={taskDraft.priority} onChange={(event) => setTaskDraft({ ...taskDraft, priority: event.target.value })}>
-              <option value="low">Low</option>
-              <option value="medium">Medium</option>
-              <option value="high">High</option>
-              <option value="critical">Critical</option>
+              <option value="low">{t('Low')}</option>
+              <option value="medium">{t('Medium')}</option>
+              <option value="high">{t('High')}</option>
+              <option value="critical">{t('Critical')}</option>
             </select>
           </label>
           <label>
-            Due date
+            {t('Due date')}
             <input type="date" value={taskDraft.dueAt} onChange={(event) => setTaskDraft({ ...taskDraft, dueAt: event.target.value })} />
           </label>
           <label>
-            Predecessor
+            {t('Predecessor')}
             <select
               value={taskDraft.predecessorTaskId}
               onChange={(event) => setTaskDraft({ ...taskDraft, predecessorTaskId: event.target.value })}
             >
-              <option value="">No predecessor</option>
+              <option value="">{t('No predecessor')}</option>
               {activeTasks.map((task) => (
                 <option key={task.id} value={task.id}>
                   {task.title}
@@ -5275,9 +5283,9 @@ function WorkPlanControl({
             </select>
           </label>
           <label className="form-span">
-            Assignee
+            {t('Assignee')}
             <select value={taskDraft.assigneeId} onChange={(event) => setTaskDraft({ ...taskDraft, assigneeId: event.target.value })}>
-              <option value="">Unassigned</option>
+              <option value="">{t('Unassigned')}</option>
               {assignees.map((assignee) => (
                 <option key={assignee.id} value={assignee.id}>
                   {assignee.name}
@@ -5288,7 +5296,7 @@ function WorkPlanControl({
           <div className="form-actions form-span">
             <button className="secondary-button" disabled={submitting || !taskDraft.title.trim() || Number(taskDraft.durationHours) <= 0}>
               <Plus size={16} />
-              Add task
+              {t('Add task')}
             </button>
           </div>
         </form>
@@ -5314,19 +5322,25 @@ function WorkPlanControl({
                 <div className="work-plan-task-copy">
                   <div>
                     <strong>{task.title}</strong>
-                    {scheduled.critical ? <span className="tag tag-red">Critical</span> : null}
+                    {scheduled.critical ? <span className="tag tag-red">{t('Critical')}</span> : null}
                     {!terminal && Number(scheduled.totalFloatHours) > 0 ? (
-                      <span className="tag">{roundDisplay(scheduled.totalFloatHours)}h float</span>
+                      <span className="tag">{t('{hours}h float', { hours: roundDisplay(scheduled.totalFloatHours) })}</span>
                     ) : null}
                   </div>
                   <small>
-                    {assignedWorker?.name || (task.assigneeId ? 'Assigned crew' : 'Unassigned')} / {formatStatus(task.priority)} / due{' '}
-                    {formatDate(task.dueAt)}
+                    {t('{assignee} / {priority} / due {date}', {
+                      assignee: assignedWorker?.name || (task.assigneeId ? t('Assigned crew') : t('Unassigned')),
+                      priority: t(formatStatus(task.priority)),
+                      date: formatDate(task.dueAt),
+                    })}
                   </small>
                   {scheduled.plannedStart && scheduled.plannedEnd ? (
                     <span className="work-plan-window">
                       <CalendarDays size={14} />
-                      {formatDateTime(scheduled.plannedStart)} to {formatDateTime(scheduled.plannedEnd)}
+                      {t('{start} to {end}', {
+                        start: formatDateTime(scheduled.plannedStart),
+                        end: formatDateTime(scheduled.plannedEnd),
+                      })}
                     </span>
                   ) : null}
                 </div>
@@ -5334,7 +5348,7 @@ function WorkPlanControl({
                   {canCoordinate && !terminal ? (
                     <>
                       <label>
-                        <span className="visually-hidden">Duration hours for {task.title}</span>
+                        <span className="visually-hidden">{t('Duration hours for {task}', { task: task.title })}</span>
                         <input
                           type="number"
                           min="0.25"
@@ -5347,8 +5361,8 @@ function WorkPlanControl({
                       <button
                         type="button"
                         className="icon-button"
-                        title="Save duration"
-                        aria-label={`Save duration for ${task.title}`}
+                        title={t('Save duration')}
+                        aria-label={t('Save duration for {task}', { task: task.title })}
                         disabled={
                           submitting || Number(durationEdits[task.id]) <= 0 || Number(durationEdits[task.id]) === Number(task.durationHours)
                         }
@@ -5368,11 +5382,11 @@ function WorkPlanControl({
                       type="button"
                       className="secondary-button"
                       disabled={submitting}
-                      aria-label={`Start ${task.title}`}
+                      aria-label={t('Start {task}', { task: task.title })}
                       onClick={() => onTaskTransition(task, 'in_progress')}
                     >
                       <Activity size={15} />
-                      Start
+                      {t('Start')}
                     </button>
                   ) : null}
                   {canUpdateTask && !terminal ? (
@@ -5380,11 +5394,11 @@ function WorkPlanControl({
                       type="button"
                       className="secondary-button"
                       disabled={submitting}
-                      aria-label={`Complete ${task.title}`}
+                      aria-label={t('Complete {task}', { task: task.title })}
                       onClick={() => onTaskTransition(task, 'completed')}
                     >
                       <Check size={15} />
-                      Complete
+                      {t('Complete')}
                     </button>
                   ) : null}
                   {canUpdateTask && !terminal && task.status !== 'blocked' ? (
@@ -5392,8 +5406,8 @@ function WorkPlanControl({
                       type="button"
                       className="icon-button"
                       disabled={submitting}
-                      title="Block task"
-                      aria-label={`Block ${task.title}`}
+                      title={t('Block task')}
+                      aria-label={t('Block {task}', { task: task.title })}
                       onClick={() => onTaskTransition(task, 'blocked')}
                     >
                       <TriangleAlert size={15} />
@@ -5404,8 +5418,8 @@ function WorkPlanControl({
                       type="button"
                       className="icon-button"
                       disabled={submitting}
-                      title="Cancel task"
-                      aria-label={`Cancel ${task.title}`}
+                      title={t('Cancel task')}
+                      aria-label={t('Cancel {task}', { task: task.title })}
                       onClick={() => onTaskTransition(task, 'cancelled')}
                     >
                       <Ban size={15} />
@@ -5417,7 +5431,7 @@ function WorkPlanControl({
           })}
         </div>
       ) : (
-        <p className="workflow-note task-empty">No retained tasks for this job.</p>
+        <p className="workflow-note task-empty">{t('No retained tasks for this job.')}</p>
       )}
 
       {canCoordinate && activeTasks.length > 1 ? (
@@ -5425,19 +5439,19 @@ function WorkPlanControl({
           <div className="work-plan-subheading">
             <div>
               <GitBranch size={16} />
-              <h4>Dependencies</h4>
+              <h4>{t('Dependencies')}</h4>
             </div>
-            <span>{dependencies.length} active</span>
+            <span>{t('{count} active', { count: dependencies.length })}</span>
           </div>
           <form className="dependency-form" onSubmit={addDependency}>
             <label>
-              Predecessor
+              {t('Predecessor')}
               <select
                 required
                 value={dependencyDraft.predecessorTaskId}
                 onChange={(event) => setDependencyDraft({ ...dependencyDraft, predecessorTaskId: event.target.value })}
               >
-                <option value="">Select task</option>
+                <option value="">{t('Select task')}</option>
                 {activeTasks.map((task) => (
                   <option key={task.id} value={task.id}>
                     {task.title}
@@ -5446,13 +5460,13 @@ function WorkPlanControl({
               </select>
             </label>
             <label>
-              Successor
+              {t('Successor')}
               <select
                 required
                 value={dependencyDraft.successorTaskId}
                 onChange={(event) => setDependencyDraft({ ...dependencyDraft, successorTaskId: event.target.value })}
               >
-                <option value="">Select task</option>
+                <option value="">{t('Select task')}</option>
                 {activeTasks
                   .filter((task) => task.id !== dependencyDraft.predecessorTaskId)
                   .map((task) => (
@@ -5463,7 +5477,7 @@ function WorkPlanControl({
               </select>
             </label>
             <label>
-              Lag (hours)
+              {t('Lag (hours)')}
               <input
                 type="number"
                 min="-1000"
@@ -5478,16 +5492,16 @@ function WorkPlanControl({
               disabled={submitting || !dependencyDraft.predecessorTaskId || !dependencyDraft.successorTaskId}
             >
               <Plus size={15} />
-              Add link
+              {t('Add link')}
             </button>
           </form>
           {dependencies.length ? (
             <div className="dependency-list">
               {dependencies.map((dependency) => (
                 <div key={dependency.id}>
-                  <span>{taskById.get(dependency.predecessorTaskId)?.title || 'Task'}</span>
+                  <span>{taskById.get(dependency.predecessorTaskId)?.title || t('Task')}</span>
                   <ChevronRight size={15} />
-                  <strong>{taskById.get(dependency.successorTaskId)?.title || 'Task'}</strong>
+                  <strong>{taskById.get(dependency.successorTaskId)?.title || t('Task')}</strong>
                   {dependency.lagHours ? (
                     <small>
                       {dependency.lagHours > 0 ? '+' : ''}
@@ -5497,8 +5511,10 @@ function WorkPlanControl({
                   <button
                     type="button"
                     className="icon-button"
-                    title="Remove dependency"
-                    aria-label={`Remove dependency to ${taskById.get(dependency.successorTaskId)?.title || 'task'}`}
+                    title={t('Remove dependency')}
+                    aria-label={t('Remove dependency to {task}', {
+                      task: taskById.get(dependency.successorTaskId)?.title || t('task'),
+                    })}
                     disabled={submitting}
                     onClick={() => onCancelDependency(dependency)}
                   >
@@ -5516,29 +5532,29 @@ function WorkPlanControl({
           <div className="work-plan-subheading">
             <div>
               <Timer size={16} />
-              <h4>Baseline control</h4>
+              <h4>{t('Baseline control')}</h4>
             </div>
-            <span className="tag">Elapsed-hour basis</span>
+            <span className="tag">{t('Elapsed-hour basis')}</span>
           </div>
           <form className="baseline-form" onSubmit={calculate}>
             <label>
-              Plan start
+              {t('Plan start')}
               <input required type="datetime-local" value={plannedStart} onChange={(event) => setPlannedStart(event.target.value)} />
             </label>
             <div className="form-actions">
               <button className="secondary-button" disabled={submitting || !plannedStart}>
                 <RefreshCw size={15} />
-                Calculate
+                {t('Calculate')}
               </button>
               <button
                 type="button"
                 className="primary-button"
                 disabled={submitting || !plan?.ready || Boolean(pendingBaseline)}
-                title={pendingBaseline ? 'Resolve the pending baseline first' : !plan?.ready ? 'Complete task durations first' : undefined}
+                title={pendingBaseline ? t('Resolve the pending baseline first') : !plan?.ready ? t('Complete task durations first') : undefined}
                 onClick={requestBaseline}
               >
                 <ShieldCheck size={15} />
-                Request baseline
+                {t('Request baseline')}
               </button>
             </div>
           </form>
@@ -5547,23 +5563,25 @@ function WorkPlanControl({
               <TriangleAlert size={16} />
               <span>
                 {plan?.reason === 'planned_start_required'
-                  ? 'Set the plan start.'
-                  : `${plan?.unscheduledTasks?.length || activeTasks.filter((task) => !Number(task.durationHours)).length} task duration(s) missing.`}
+                  ? t('Set the plan start.')
+                  : t('{count} task duration(s) missing.', {
+                      count: plan?.unscheduledTasks?.length || activeTasks.filter((task) => !Number(task.durationHours)).length,
+                    })}
               </span>
             </div>
           ) : (
             <div className="work-plan-result" aria-live="polite">
               <div>
-                <span>Calculated finish</span>
+                <span>{t('Calculated finish')}</span>
                 <strong>{formatDateTime(plan.plannedEnd)}</strong>
               </div>
               <div>
-                <span>Critical path</span>
-                <strong>{plan.criticalPathTaskIds?.length || 0} tasks</strong>
+                <span>{t('Critical path')}</span>
+                <strong>{t('{count} tasks', { count: plan.criticalPathTaskIds?.length || 0 })}</strong>
               </div>
               <div>
-                <span>14-day look-ahead</span>
-                <strong>{plan.lookAhead?.length || 0} tasks</strong>
+                <span>{t('14-day look-ahead')}</span>
+                <strong>{t('{count} tasks', { count: plan.lookAhead?.length || 0 })}</strong>
               </div>
             </div>
           )}
@@ -5574,7 +5592,7 @@ function WorkPlanControl({
               onClick={() => onOpenApprovals({ jobId: job.id, jobTitle: job.title, approvalId: pendingBaseline.approvalId })}
             >
               <ShieldCheck size={15} />
-              Review baseline v{pendingBaseline.versionNumber}
+              {t('Review baseline v{version}', { version: pendingBaseline.versionNumber })}
             </button>
           ) : null}
         </div>

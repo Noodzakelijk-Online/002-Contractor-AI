@@ -128,7 +128,8 @@ external-provider engines.
 5. Per-principal operator language and token-scoped client-portal language are
    retained in the ledger. The shell, client portal, Performance Scorecard, and
    Framework Register are bilingual and formatting follows the selected locale,
-   but the remaining specialist operator workspace copy is not yet fully translated.
+   Job setup coverage and critical-path work planning are also bilingual, but the
+   remaining specialist operator workspace copy is not yet fully translated.
 6. Legal retention periods and data-subject erasure decisions remain operator and
    counsel responsibilities. The application archives and exports; it does not
    silently delete immutable commercial or audit evidence.

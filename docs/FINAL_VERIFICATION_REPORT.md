@@ -18,14 +18,14 @@ decisions outside this repository.
 | --- | --- | --- |
 | Lint | Passed | `npm run lint` |
 | Dependency audit | Passed | `npm audit --omit=dev --audit-level=high`: 0 vulnerabilities |
-| Release contract | Passed | `npm run verify:release`: 67 canonical paths, 12 retired paths, 16 hosted keys, 329 canonical source files; generated release/runtime/artifact directories excluded |
+| Release contract | Passed | `npm run verify:release`: 67 canonical paths, 12 retired paths, 16 hosted keys, 333 canonical source files; generated release/runtime/artifact directories excluded |
 | HAI input contract | Passed | Native verifier produced the checksummed `accountfeed.GenericItem` review-only fixture with `canExecute=false`; a live HAI parser/account-feed sync was not configured for this run |
 | Frontend tests | Passed | Vitest 4.1.10 with Testing Library: 3 files, 10 locale/component tests, 0 failed |
-| Node tests | Passed | Node 22.23.2 isolated suite: 533 tests, 497 passed, 36 PostgreSQL/environment skips, 0 failed, 113.4 s |
-| Production build | Passed | `npm run build`: main application JS 533.28 kB and CSS 274.66 kB before gzip; the base locale remains 12.79 kB JS and the expanded 118.01 kB specialist operator catalog is loaded only when Dutch is active; client portal is 24.43 kB JS/10.19 kB CSS and job workspace controls are 237.87 kB JS |
-| Bundle budget | Passed | `npm run verify:bundle`: largest JS 533,281 bytes, largest CSS 274,661 bytes, and 418,360 total gzip bytes across 39 assets; all budgets passed |
-| Production-scale ledger | Passed | The retained deterministic 57,500-row production profile passed its correctness/resource/latency thresholds. The current-source 4,480-record smoke rerun measured dashboard p95 39.8 ms, canonical intake p95 31.83 ms, startup 320.25 ms, reopen 5.25 ms, and audit verification p95 15.6 ms. |
-| Browser tests | Passed | All 90 Playwright Chromium workflows passed on current source in 23 bounded isolated batches |
+| Node tests | Passed | Node 22.23.2 isolated suite: 534 tests, 498 passed, 36 PostgreSQL/environment skips, 0 failed, 71.9 s |
+| Production build | Passed | `npm run build`: main application JS 537.87 kB and CSS 274.99 kB before gzip; the base locale remains 12.79 kB JS and the expanded 163.41 kB specialist operator catalog is loaded only when Dutch is active; client portal is 24.43 kB JS/10.19 kB CSS and job workspace controls are 240.67 kB JS |
+| Bundle budget | Passed | `npm run verify:bundle`: largest JS 537,872 bytes, largest CSS 274,985 bytes, and 434,974 total gzip bytes across 39 assets; all budgets passed |
+| Production-scale ledger | Passed | The retained deterministic 57,500-row production profile passed its correctness/resource/latency thresholds: dashboard p95 431.81 ms, canonical intake p95 38.97 ms, startup 296.82 ms, reopen 4.89 ms, and audit verification p95 255.96 ms. |
+| Browser tests | Passed | All 94 Playwright Chromium workflows passed on current source in 24 bounded isolated batches |
 | Accessibility gate | Passed | Pinned `@axe-core/playwright` 4.12.1 scanned production sign-in, all twelve owner workspaces, representative dialogs, mobile navigation, and mobile/desktop client portal surfaces with zero selected WCAG A/AA violations and no rule or component exclusions |
 | Container runtime | Passed | `npm run test:container`: non-root, read-only, loopback, authentication, SQLite volume persistence, restart persistence, graceful shutdown and migration 072 smoke |
 | Local runtime | Passed | Node and browser gates each served the current production build from isolated local runtimes; public readiness, authenticated session, persistence, and graceful shutdown probes passed |
@@ -49,9 +49,9 @@ decisions outside this repository.
 | Audit actor integrity | Passed for authenticated role principals, scoped client portal identity, and local `local:owner`; all explicit mutation sites plus 65 former workflow-label fallbacks consume the trusted principal directly. Approval and authoritative operational provenance preserve that principal through retained decisions, downstream releases, chained history, and separation-of-duty checks. NCR closure retains both named and authenticated verifier identities and rejects self-approval. The release contract rejects body-derived actors, fallback routes, and submitted-first approval or operational principals |
 | Work-permit timing integrity | Passed with creation, readiness, and approval expiry bound to the injected ledger clock; deterministic expiry tests retain fail-closed approval behavior without wall-clock sleeps |
 | Draft recovery | Passed for reload restoration, operator isolation, portal-token fingerprinting, expiry/size bounds, secret/file exclusion, logout and intentional-close cleanup, no implicit ledger write, and explicit job-workspace navigation |
-| In-app Browser QA | Passed against the current built runtime: persisted NL shell rendering, localized currency, compact navigation, no horizontal overflow, and a clean inspected error log; ICP/service-area, bid/no-bid, WBS/quantity takeoff, labour-burden/overhead/unit-rate estimating, commercial scope/allowances, project risk/premortem, fixed-price-versus-regie decisions, estimates and formal variations, crew-capacity/two-week planning, daily start/EOD reporting, production baseline/output/reversal, regiewerk quantity/acknowledgement/conversion, Last Planner, 5S, LMRA, installation/QC inspections, before/during/after photo evidence, punch/warranty/aftercare/feedback closeout, client-success handover, and 13-week cash-flow controls render in Dutch. Retained operator evidence remains verbatim across locale changes, while the complete portal, Performance Scorecard, Framework Register, site-survey, and practical-core persistence flows passed in Playwright. |
+| In-app Browser QA | Passed against the current built runtime: persisted NL shell rendering, localized currency, compact navigation, no horizontal overflow, and a clean inspected error log; ICP/service-area, bid/no-bid, WBS/quantity takeoff, labour-burden/overhead/unit-rate estimating, commercial scope/allowances, project risk/premortem, fixed-price-versus-regie decisions, estimates and formal variations, job setup coverage, critical-path work planning, crew-capacity/two-week planning, daily start/EOD reporting, production baseline/output/reversal, regiewerk quantity/acknowledgement/conversion, Last Planner, 5S, LMRA, installation/QC inspections, before/during/after photo evidence, punch/warranty/aftercare/feedback closeout, client-success handover, and 13-week cash-flow controls render in Dutch. Retained operator evidence remains verbatim across locale changes, while the complete portal, Performance Scorecard, Framework Register, site-survey, and practical-core persistence flows passed in Playwright. |
 | In-app Browser draft QA | Passed against the current built runtime: an unfinished opportunity restored exact values after reload, an intentional close cleared it, and no visible error state remained |
-| Responsive evidence | Desktop and narrow-screen QA-maintenance geometry was inspected in the in-app browser; the audit toolbar now uses shell-aware breakpoints with explicit viewport containment assertions, and 90 automated workflows retain repeatable desktop/mobile interaction evidence |
+| Responsive evidence | Desktop and narrow-screen geometry was inspected in the in-app browser; the job summary now uses a stable two-by-two mobile layout with localized label wrapping and exact workspace containment, and 94 automated workflows retain repeatable desktop/mobile interaction evidence |
 
 ## Confirmed limitations
 
@@ -64,7 +64,8 @@ decisions outside this repository.
   Register, ICP/service-area, bid/no-bid, site-survey, WBS/quantity takeoff,
   labour-burden/overhead/unit-rate estimating, commercial scope/allowances,
   project risk/premortem, fixed-price-versus-regie decisions, estimates,
-  quote acceptance, formal variations, crew-capacity/two-week planning, daily
+  quote acceptance, formal variations, job setup coverage, critical-path work
+  planning, crew-capacity/two-week planning, daily
   start/EOD reporting, production baseline/output/reversal, regiewerk
   quantity/acknowledgement/conversion, Last Planner, 5S, LMRA, installation/QC
   inspections, before/during/after photo evidence, punch/warranty/aftercare/feedback

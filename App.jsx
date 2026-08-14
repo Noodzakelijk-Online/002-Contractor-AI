@@ -15879,6 +15879,7 @@ function App() {
                   {!fieldScoped ? (
                     <CapabilitySetupControl
                       job={selectedJob}
+                      locale={operatorLocale}
                       canCoordinate={canCoordinate}
                       submitting={submitting}
                       onApply={applyCapabilitySetup}
@@ -15886,6 +15887,7 @@ function App() {
                   ) : null}
                   <WorkPlanControl
                     job={selectedJob}
+                    locale={operatorLocale}
                     canCoordinate={canCoordinate}
                     canApprove={capabilities.approvals === true}
                     fieldScoped={fieldScoped}
