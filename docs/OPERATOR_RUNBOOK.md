@@ -126,7 +126,7 @@ report; use `npm run test:performance` for the smaller developer smoke profile.
    storage with versioning and prefix-scoped credentials.
 3. Configure every value in `.env.hosted.example`, including exact HTTPS/CORS/proxy
    values. Do not commit the resulting file.
-4. Create, validate, download, and separately retain a local v2 backup and export.
+4. Create, validate, download, and separately retain a signed local v3 backup and export.
 5. With the app stopped, migrate into an empty target using `npm run migrate:hosted`.
 6. Verify the migration receipt, row/evidence reconciliation, audit integrity,
    authenticated readiness, provider storage probe, and owner login.

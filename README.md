@@ -295,7 +295,7 @@ The supported surface is `/api/ledger/*`, including opportunities, intake, jobs,
 
 - `GET /api/operations/export` downloads a SHA-256 protected v2 reconciliation artifact, including opportunities, governed market-fit profiles and assessments, bid/no-bid policies and pursuit decisions, project-control registers, schedule baselines, task dependencies, billing milestones, supplier invoices, and retained supplier-payment evidence. It is human-readable and explicitly non-restorable.
 - `POST /api/operations/exports/validate` verifies the v2 export structure and checksum. Ordinary JSON mutations remain limited to 2 MB; this owner-authorized reconciliation endpoint uses a separate 16 MB ceiling so a retained operational export can be checked without relaxing the rest of the API.
-- `POST /api/operations/backup`
+- `POST /api/operations/backup` creates a signed v3 recovery package in a hidden staging directory and publishes it atomically only after the SQLite, evidence, export, and manifest files are complete. Failed staging data is removed and never appears in the retained backup register.
 - `GET /api/operations/backups`
 - `GET /api/operations/backups/:backupId/verify`
 - Owner-only `GET /api/operations/backups/:backupId/download` streams the verified SQLite and evidence package as `tar.gz`.

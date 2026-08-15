@@ -67,7 +67,7 @@ manual evidence is recorded in `FINAL_VERIFICATION_REPORT.md`.
 | 050 | Responsive and browser compatibility | Implemented | 100 desktop/mobile operator, client and field Chromium tests in isolated batches |
 | 051 | Performance baseline and indexing | Implemented | bundle budgets plus deterministic 63,500-row Node 22 benchmark, hot-queue indexes, p50/p95/resource thresholds and CI report |
 | 052 | Large dataset and pagination testing | Implemented | 5,000 jobs, 20,000 tasks, 2,500 opportunities, 5,000 approvals and 25,000 chained audit events verify bounded lists, historical search and untruncated aggregates |
-| 053 | Backup and restore procedures | Implemented | v2 DB/evidence manifests, checksums, validation, session revocation, runbook |
+| 053 | Backup and restore procedures | Implemented | signed v3 DB/evidence manifests, atomic publication, authenticated checksums, validation, rollback, session revocation, runbook |
 | 054 | Data reconciliation and repair commands | Partial | integrity/reconciliation/restore/migration tools exist; no generic mutation repair CLI |
 | 055 | Product analytics local-first design | Implemented | retained contractor scorecard and operating metrics; no forced external telemetry |
 | 056 | SaaS readiness without forced billing | Implemented | portable hosted contract with local-first mode; billing is not required |

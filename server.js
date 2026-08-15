@@ -7817,6 +7817,21 @@ function assertLocalBackupMode() {
   throw error;
 }
 
+function cleanupStaleBackupStaging(backupRoot, maxAgeMs = 24 * 60 * 60 * 1000) {
+  if (!fs.existsSync(backupRoot)) return 0;
+  let removed = 0;
+  for (const entry of fs.readdirSync(backupRoot, { withFileTypes: true })) {
+    if (!entry.isDirectory() || !entry.name.startsWith('.pending-')) continue;
+    const target = path.resolve(backupRoot, entry.name);
+    if (path.dirname(target) !== path.resolve(backupRoot)) continue;
+    const stats = fs.lstatSync(target);
+    if (stats.isSymbolicLink() || Date.now() - stats.mtimeMs < maxAgeMs) continue;
+    fs.rmSync(target, { recursive: true, force: true });
+    removed += 1;
+  }
+  return removed;
+}
+
 function backupOperationalState() {
   assertLocalBackupMode();
   if (!backupSigningKeyValid) {
@@ -7825,64 +7840,73 @@ function backupOperationalState() {
     error.code = 'backup_signing_key_required';
     throw error;
   }
-  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const backupRoot = path.join(dataDir, 'backups');
-  const backupDir = path.join(backupRoot, timestamp);
-  fs.mkdirSync(backupDir, { recursive: true });
-  if (operatingLedger.databaseMode === 'sqlite') {
-    try {
-      operatingLedger.db.exec('PRAGMA wal_checkpoint(FULL)');
-    } catch (error) {
-      log('warn', 'ledger_backup_checkpoint_failed', { error: serializeError(error) });
-    }
-  }
+  const createdAt = new Date().toISOString();
+  const backupId = `${createdAt.replace(/[:.]/g, '-')}-${crypto.randomBytes(6).toString('hex')}`;
+  const backupRoot = path.resolve(dataDir, 'backups');
+  const backupDir = path.join(backupRoot, backupId);
+  fs.mkdirSync(backupRoot, { recursive: true });
+  cleanupStaleBackupStaging(backupRoot);
+  const stagingDir = fs.mkdtempSync(path.join(backupRoot, '.pending-'));
 
-  const copied = [];
-  const manifestFiles = [];
-  const backupSources = operatingLedger.databaseMode === 'sqlite'
-    ? [stateFile, ledgerFile, `${ledgerFile}-wal`, `${ledgerFile}-shm`]
-    : [stateFile];
-  for (const source of backupSources) {
-    if (!fs.existsSync(source)) continue;
-    const target = path.join(backupDir, path.basename(source));
-    fs.copyFileSync(source, target);
-    copied.push(path.relative(__dirname, target).replace(/\\/g, '/'));
-    manifestFiles.push({ file: path.basename(target), bytes: fs.statSync(target).size, sha256: sha256File(target) });
+  try {
+    if (operatingLedger.databaseMode === 'sqlite') {
+      try {
+        operatingLedger.db.exec('PRAGMA wal_checkpoint(FULL)');
+      } catch (error) {
+        log('warn', 'ledger_backup_checkpoint_failed', { error: serializeError(error) });
+      }
+    }
+
+    const manifestFiles = [];
+    const backupSources = operatingLedger.databaseMode === 'sqlite'
+      ? [stateFile, ledgerFile, `${ledgerFile}-wal`, `${ledgerFile}-shm`]
+      : [stateFile];
+    for (const source of backupSources) {
+      if (!fs.existsSync(source)) continue;
+      const target = path.join(stagingDir, path.basename(source));
+      fs.copyFileSync(source, target);
+      manifestFiles.push({ file: path.basename(target), bytes: fs.statSync(target).size, sha256: sha256File(target) });
+    }
+    const evidenceBackup = operatingLedger.databaseMode === 'sqlite'
+      ? copyEvidenceBackup(uploadDir, stagingDir)
+      : { entries: [] };
+    manifestFiles.push(...evidenceBackup.entries);
+    const exportFile = path.join(stagingDir, 'operational-export.json');
+    fs.writeFileSync(exportFile, JSON.stringify(operationalExport(), null, 2));
+    manifestFiles.push({ file: path.basename(exportFile), bytes: fs.statSync(exportFile).size, sha256: sha256File(exportFile) });
+    const manifest = signBackupManifest({
+      format: BACKUP_MANIFEST_V3,
+      backupId,
+      createdAt,
+      databaseMode: operatingLedger.databaseMode,
+      database: operatingLedger.databaseMode === 'sqlite'
+        ? { engine: 'sqlite', file: path.basename(ledgerFile) }
+        : { engine: operatingLedger.databaseMode, file: null },
+      evidence: {
+        included: operatingLedger.databaseMode === 'sqlite',
+        fileCount: evidenceBackup.entries.length
+      },
+      files: manifestFiles
+    }, backupSigningKey);
+    fs.writeFileSync(path.join(stagingDir, 'manifest.json'), JSON.stringify(manifest, null, 2));
+
+    const files = [
+      ...manifestFiles.map(entry => entry.file),
+      'manifest.json'
+    ].map(file => path.relative(__dirname, path.join(backupDir, ...file.split('/'))).replace(/\\/g, '/'));
+    fs.renameSync(stagingDir, backupDir);
+    return {
+      backupId,
+      databaseMode: operatingLedger.databaseMode,
+      files,
+      evidenceFiles: evidenceBackup.entries.length,
+      verification: { valid: true, checkedFiles: manifestFiles.length },
+      providerBackupRequired: operatingLedger.databaseMode === 'postgres'
+    };
+  } catch (error) {
+    fs.rmSync(stagingDir, { recursive: true, force: true });
+    throw error;
   }
-  const evidenceBackup = operatingLedger.databaseMode === 'sqlite'
-    ? copyEvidenceBackup(uploadDir, backupDir)
-    : { copied: [], entries: [] };
-  copied.push(...evidenceBackup.copied);
-  manifestFiles.push(...evidenceBackup.entries);
-  const exportFile = path.join(backupDir, 'operational-export.json');
-  fs.writeFileSync(exportFile, JSON.stringify(operationalExport(), null, 2));
-  copied.push(path.relative(__dirname, exportFile).replace(/\\/g, '/'));
-  manifestFiles.push({ file: path.basename(exportFile), bytes: fs.statSync(exportFile).size, sha256: sha256File(exportFile) });
-  const manifest = signBackupManifest({
-    format: BACKUP_MANIFEST_V3,
-    backupId: timestamp,
-    createdAt: new Date().toISOString(),
-    databaseMode: operatingLedger.databaseMode,
-    database: operatingLedger.databaseMode === 'sqlite'
-      ? { engine: 'sqlite', file: path.basename(ledgerFile) }
-      : { engine: operatingLedger.databaseMode, file: null },
-    evidence: {
-      included: operatingLedger.databaseMode === 'sqlite',
-      fileCount: evidenceBackup.entries.length
-    },
-    files: manifestFiles
-  }, backupSigningKey);
-  const manifestFile = path.join(backupDir, 'manifest.json');
-  fs.writeFileSync(manifestFile, JSON.stringify(manifest, null, 2));
-  copied.push(path.relative(__dirname, manifestFile).replace(/\\/g, '/'));
-  return {
-    backupId: timestamp,
-    databaseMode: operatingLedger.databaseMode,
-    files: copied,
-    evidenceFiles: evidenceBackup.entries.length,
-    verification: { valid: true, checkedFiles: manifestFiles.length },
-    providerBackupRequired: operatingLedger.databaseMode === 'postgres'
-  };
 }
 
 function backupDirectoryForId(backupId) {
@@ -8111,7 +8135,7 @@ function listOperationalBackups() {
   const backupRoot = path.join(dataDir, 'backups');
   if (!fs.existsSync(backupRoot)) return [];
   return fs.readdirSync(backupRoot, { withFileTypes: true })
-    .filter(entry => entry.isDirectory())
+    .filter(entry => entry.isDirectory() && !entry.name.startsWith('.pending-'))
     .map(entry => {
       try {
         const { manifest } = readBackupManifest(entry.name);
@@ -8262,7 +8286,7 @@ app.post('/api/operations/backup', (req, res) => {
   try {
     return res.status(201).json({ success: true, backup: backupOperationalState() });
   } catch (error) {
-    return sendError(req, res, error.statusCode || 500, error.code || 'backup_failed', error.statusCode ? error.message : 'Unable to create a local operational backup.', serializeError(error));
+    return sendError(req, res, error.statusCode || 500, error.statusCode ? (error.code || 'backup_failed') : 'backup_failed', error.statusCode ? error.message : 'Unable to create a local operational backup.', serializeError(error));
   }
 });
 

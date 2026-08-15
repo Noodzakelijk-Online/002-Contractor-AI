@@ -14144,7 +14144,7 @@ function App() {
                   )}
                   <p className="panel-copy">
                     {localBackupAvailable
-                      ? 'Local backup v2 is the recovery artifact: it retains the SQLite ledger and private evidence with checksums. Download it to encrypted off-device storage; restore it only while the application is stopped.'
+                      ? 'Signed local backup v3 is the recovery artifact: it retains the SQLite ledger and private evidence with authenticated checksums. Download it to encrypted off-device storage; restore it only while the application is stopped.'
                       : 'Application-local packages are disabled in hosted mode because they cannot contain managed PostgreSQL and private object-store data.'}
                   </p>
                 </section>

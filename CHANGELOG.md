@@ -5,6 +5,10 @@ Versioning for the application contract; database migrations remain append-only.
 
 ## Unreleased
 
+- Local recovery packages now build in hidden staging directories and publish
+  atomically under collision-resistant backup ids. Failed copies are removed,
+  stale staging data is reaped, and internal filesystem errors retain a stable
+  `backup_failed` API contract instead of appearing as recovery points.
 - Hardened ngrok startup into a verified lifecycle: the launcher now proves local
   readiness, rejects unauthenticated public readiness access, validates the
   authenticated public runtime projection before announcing success, records the

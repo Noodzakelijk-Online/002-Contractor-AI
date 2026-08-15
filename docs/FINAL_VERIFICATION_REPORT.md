@@ -1,8 +1,8 @@
 # Final Verification Report
 
-Report date: 2026-08-14
+Report date: 2026-08-15
 Release candidate: `1.1.0`
-Starting revision: `7b6b1a40b44896fc0f29e31eadd100dc95e6475c`
+Starting revision: `210c2673ebcd70f681f401650ec7cccf2d81406b`
 Release revision: the Git commit containing this report; record the resulting SHA
 in the release or deployment record.
 
@@ -17,14 +17,14 @@ decisions outside this repository.
 | Gate | Result | Evidence |
 | --- | --- | --- |
 | Lint | Passed | `npm run lint` |
-| Dependency audit | Passed | `npm audit --omit=dev --audit-level=high`: 0 vulnerabilities |
-| Release contract | Passed | `npm run verify:release`: 67 canonical paths, 12 retired paths, 16 hosted keys, 340 canonical source files; generated release/runtime/artifact directories excluded |
+| Dependency audit | Passed | `npm audit --audit-level=low`: 0 vulnerabilities |
+| Release contract | Passed | `npm run verify:release`: 69 canonical paths, 12 retired paths, 16 hosted keys, 348 canonical source files; generated release/runtime/artifact directories excluded |
 | HAI input contract | Passed | Native verifier and maintained HAI parser accepted the checksummed `accountfeed.GenericItem` review-only feed with `canExecute=false`; direct local publication read the atomic file back successfully, while live HAI registration/polling was not configured |
 | Frontend tests | Passed | Vitest 4.1.10 with Testing Library: 3 files, 11 locale/component tests, 0 failed |
-| Node tests | Passed | Isolated suite: 540 tests, 504 passed, 36 PostgreSQL/environment skips, 0 failed, 78.8 s |
-| Production build | Passed | `npm run build`: largest application JS 548,425 bytes and CSS 275,210 bytes before gzip; the specialist operator catalog remains demand-loaded only when Dutch is active |
-| Bundle budget | Passed | `npm run verify:bundle`: largest JS 548,425 bytes, largest CSS 275,210 bytes, and 462,638 total gzip bytes across 39 assets; all budgets passed |
-| Production-scale ledger | Passed | The retained deterministic 63,500-row profile passed its correctness/resource/latency thresholds in an uncontended run: dashboard p95 433.20 ms, canonical intake p95 47.40 ms, startup 326.81 ms, reopen 5.33 ms, seed 1,155.31 ms, and audit verification 231.89 ms. |
+| Node tests | Passed | Isolated suite: 555 tests, 519 passed, 36 PostgreSQL/environment skips, 0 failed, 330.0 s |
+| Production build | Passed | `npm run build`: largest application JS 548,446 bytes and CSS 275,210 bytes before gzip; the specialist operator catalog remains demand-loaded only when Dutch is active |
+| Bundle budget | Passed | `npm run verify:bundle`: largest JS 548,446 bytes, largest CSS 275,210 bytes, and 462,645 total gzip bytes across 39 assets; all budgets passed |
+| Production-scale ledger | Passed | The retained deterministic 63,500-row profile passed its correctness/resource/latency thresholds in an uncontended run: dashboard p95 0.44 ms, canonical intake p95 66.49 ms, startup 1,017.45 ms, reopen 9.55 ms, seed 1,562.75 ms, and audit verification 301.45 ms. |
 | Browser tests | Passed | All 101 Playwright Chromium workflows passed on current source in 26 bounded isolated batches |
 | Accessibility gate | Passed | Pinned `@axe-core/playwright` 4.12.1 scanned production sign-in, all twelve owner workspaces, representative dialogs, mobile navigation, and mobile/desktop client portal surfaces with zero selected WCAG A/AA violations and no rule or component exclusions |
 | Container runtime | Passed | `npm run test:container`: non-root, read-only, loopback, authentication, SQLite volume persistence, restart persistence, graceful shutdown and migration 072 smoke |
