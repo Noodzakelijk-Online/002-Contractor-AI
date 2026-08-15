@@ -278,6 +278,7 @@ test('dashboard auth guard accepts bearer, API-key, contractor token, and browse
     assert.equal(denied.response.status, 401);
     assert.equal(denied.body.error.code, 'authentication_required');
     assert.match(denied.response.headers.get('www-authenticate') || '', /Bearer realm="Contractor\.AI"/);
+    assert.match(denied.response.headers.get('cache-control') || '', /\bno-store\b/);
 
     const publicSession = await request(baseUrl, '/api/session');
     assert.equal(publicSession.response.status, 200);
@@ -298,11 +299,13 @@ test('dashboard auth guard accepts bearer, API-key, contractor token, and browse
     assert.equal(publicReadiness.body.status, 'ready');
     assert.equal(publicReadiness.body.runtime, undefined);
     assert.equal(publicReadiness.body.migrations, undefined);
+    assert.match(publicReadiness.response.headers.get('cache-control') || '', /\bno-store\b/);
 
     const bearer = await request(baseUrl, '/api/ledger/dashboard', {
       headers: { Authorization: `Bearer ${token}` }
     });
     assert.equal(bearer.response.status, 200);
+    assert.match(bearer.response.headers.get('cache-control') || '', /\bno-store\b/);
 
     const authenticatedHealth = await request(baseUrl, '/api/health', {
       headers: { Authorization: `Bearer ${token}` }
@@ -384,6 +387,7 @@ test('approved client portal tokens work without exposing the authenticated dash
     const portal = await request(baseUrl, `/api/client-portal/${access.body.access.portalToken}`);
     assert.equal(portal.response.status, 200);
     assert.equal(portal.body.job.title, 'Authenticated portal job');
+    assert.match(portal.response.headers.get('cache-control') || '', /\bno-store\b/);
 
     const portalPreference = await request(baseUrl, `/api/client-portal/${access.body.access.portalToken}/preferences`, {
       method: 'PATCH',

@@ -5,6 +5,9 @@ Versioning for the application contract; database migrations remain append-only.
 
 ## Unreleased
 
+- All API responses now default to `Cache-Control: no-store`, including early
+  authentication failures and token-scoped client portal data. Explicitly
+  non-sensitive catalog routes can still opt into a bounded private cache.
 - Local recovery packages now build in hidden staging directories and publish
   atomically under collision-resistant backup ids. Failed copies are removed,
   stale staging data is reaped, and internal filesystem errors retain a stable
