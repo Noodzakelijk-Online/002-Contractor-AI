@@ -7,6 +7,7 @@ const crypto = require('crypto');
 const zlib = require('node:zlib');
 const { Readable } = require('node:stream');
 const { pipeline } = require('node:stream/promises');
+const yauzl = require('yauzl');
 const {
   ContractorOperatingLedger,
   LEDGER_CAPABILITY_BLUEPRINT,
@@ -22,6 +23,12 @@ const {
 const { OpenMeteoWeatherService } = require('./weather-service');
 const { EvidenceStorageError, createEvidenceStorage } = require('./evidence-storage');
 const { verifySqliteBackupDatabase } = require('./scripts/restore-local-backup');
+const {
+  BACKUP_MANIFEST_V3,
+  signBackupManifest,
+  verifyBackupManifestAuthenticity
+} = require('./backup-manifest');
+const { acquireRuntimeLock } = require('./runtime-lock');
 const {
   boundedFeedLimit,
   buildHaiFeed,
@@ -46,6 +53,9 @@ const dataDir = process.env.CONTRACTOR_AI_DATA_DIR
 const distDir = path.join(__dirname, 'dist');
 const runtimeMode = String(process.env.CONTRACTOR_AI_RUNTIME_MODE || 'local').trim().toLowerCase();
 const storageMode = String(process.env.CONTRACTOR_AI_STORAGE_MODE || 'local').trim().toLowerCase();
+const runtimeProcessLockRequired = runtimeMode === 'local'
+  && (process.env.CONTRACTOR_AI_PROCESS_LOCK_REQUIRED === 'true' || process.env.NODE_ENV === 'production');
+let runtimeProcessLock = null;
 const haiFeedOutputPath = String(process.env.CONTRACTOR_AI_HAI_FEED_PATH || '').trim();
 const trustedProxyRaw = String(process.env.CONTRACTOR_AI_TRUST_PROXY || '').trim();
 const trustedProxyEntries = trustedProxyRaw.split(',').map(value => value.trim()).filter(Boolean);
@@ -144,6 +154,12 @@ let evidenceStorageVerificationCache = evidenceStorageInitError
 let evidenceStorageVerificationPromise = null;
 let ledgerDiagnosticsCache = null;
 const maxUploadBytes = Math.max(1024, Number(process.env.MAX_UPLOAD_BYTES || 10 * 1024 * 1024));
+const evidenceStorageMaxBytesInput = String(process.env.CONTRACTOR_AI_EVIDENCE_STORAGE_MAX_BYTES || '').trim();
+const parsedEvidenceStorageMaxBytes = Number(evidenceStorageMaxBytesInput || 10 * 1024 * 1024 * 1024);
+const evidenceStorageMaxBytes = Number.isSafeInteger(parsedEvidenceStorageMaxBytes) && parsedEvidenceStorageMaxBytes > 0
+  ? parsedEvidenceStorageMaxBytes
+  : null;
+let pendingEvidenceStorageBytes = 0;
 const maxMultipartParts = boundedInteger(process.env.CONTRACTOR_AI_MULTIPART_MAX_PARTS, 64, 8, 256);
 const maxMultipartFields = boundedInteger(process.env.CONTRACTOR_AI_MULTIPART_MAX_FIELDS, 32, 4, 128);
 const maxMultipartHeaderPairs = boundedInteger(process.env.CONTRACTOR_AI_MULTIPART_MAX_HEADER_PAIRS, 16, 4, 64);
@@ -155,6 +171,8 @@ const allowedOrigins = (process.env.CORS_ORIGINS || 'http://localhost:3000,http:
 const isProduction = process.env.NODE_ENV === 'production';
 const dashboardAuthRequired = isProduction || runtimeMode === 'hosted' || process.env.CONTRACTOR_AI_REQUIRE_AUTH === 'true';
 const dashboardAuthToken = process.env.CONTRACTOR_AI_AUTH_TOKEN || process.env.DASHBOARD_AUTH_TOKEN || '';
+const backupSigningKey = String(process.env.CONTRACTOR_AI_BACKUP_SIGNING_KEY || '');
+const backupSigningKeyValid = Buffer.byteLength(backupSigningKey, 'utf8') >= 32 && !isTemplatePlaceholder(backupSigningKey);
 const minimumOperatorTokenLength = 32;
 const roleTokenConfig = parseRoleTokens(process.env.CONTRACTOR_AI_ROLE_TOKENS);
 const operatorSessionCookieName = 'contractor_ai_session';
@@ -249,6 +267,11 @@ function runtimeConfiguration(options = {}) {
   if (!['local', 's3'].includes(storageMode)) {
     issues.push({ code: 'invalid_storage_mode', message: 'CONTRACTOR_AI_STORAGE_MODE must be local or s3.' });
   }
+  if (!evidenceStorageMaxBytes) {
+    issues.push({ code: 'evidence_storage_quota_invalid', message: 'CONTRACTOR_AI_EVIDENCE_STORAGE_MAX_BYTES must be a positive safe integer.' });
+  } else if (hosted && !evidenceStorageMaxBytesInput) {
+    issues.push({ code: 'hosted_evidence_storage_quota_required', message: 'Hosted mode requires an explicit cumulative evidence storage quota.' });
+  }
   if (haiFeedOutputPath && !path.isAbsolute(haiFeedOutputPath)) {
     issues.push({ code: 'hai_feed_path_invalid', message: 'CONTRACTOR_AI_HAI_FEED_PATH must be an absolute path when configured.' });
   }
@@ -275,6 +298,9 @@ function runtimeConfiguration(options = {}) {
   }
   if (isProduction && !hasConfiguredAuthToken) {
     issues.push({ code: 'production_auth_token_required', message: 'Production requires a strong CONTRACTOR_AI_AUTH_TOKEN or role token configuration.' });
+  }
+  if (isProduction && operatingLedger?.databaseMode === 'sqlite' && !backupSigningKeyValid) {
+    issues.push({ code: 'backup_signing_key_required', message: 'Production local mode requires CONTRACTOR_AI_BACKUP_SIGNING_KEY with at least 32 UTF-8 bytes.' });
   }
   if (isProduction && templateValues.length) {
     issues.push({ code: 'template_placeholder_configured', message: `Production configuration contains template placeholder values for: ${templateValues.join(', ')}.` });
@@ -401,7 +427,10 @@ function runtimeConfiguration(options = {}) {
       recovery: {
         postgresBackupMode: ['snapshot', 'pitr'].includes(postgresBackupMode) ? postgresBackupMode : null,
         objectVersioningEnabled,
-        policyConfigured: isConfiguredReference(backupPolicyReference)
+        policyConfigured: isConfiguredReference(backupPolicyReference),
+        localManifestAuthentication: operatingLedger?.databaseMode === 'sqlite'
+          ? { configured: backupSigningKeyValid, algorithm: backupSigningKeyValid ? 'hmac-sha256' : null }
+          : { configured: false, algorithm: null }
       },
       retentionPolicyConfigured: isConfiguredReference(retentionPolicyReference)
     },
@@ -409,7 +438,14 @@ function runtimeConfiguration(options = {}) {
       status: storageVerification?.status || 'unverified',
       verified: Boolean(storageVerification?.ready),
       checkedAt: storageVerification?.checkedAt || null,
-      code: storageVerification?.code || null
+      code: storageVerification?.code || null,
+      quota: {
+        configured: Boolean(evidenceStorageMaxBytes),
+        explicit: Boolean(evidenceStorageMaxBytesInput),
+        maxBytes: evidenceStorageMaxBytes,
+        pendingBytes: pendingEvidenceStorageBytes,
+        usage: operatingLedger?.evidenceStorageUsage?.() || { bytes: 0, objects: 0 }
+      }
     },
     autonomousScheduler: {
       enabled: autonomousSchedulerEnabled,
@@ -582,7 +618,47 @@ function recordAuthenticationFailure(req, res) {
   }
 }
 
-function validateEvidenceUpload(file) {
+async function validateDocxPackage(bytes) {
+  const requiredEntries = new Set(['[Content_Types].xml', '_rels/.rels', 'word/document.xml']);
+  const seenEntries = new Set();
+  let totalUncompressedBytes = 0;
+  let entryCount = 0;
+  let zipFile;
+  try {
+    zipFile = await yauzl.fromBufferPromise(bytes, {
+      autoClose: true,
+      strictFileNames: true,
+      validateEntrySizes: true
+    });
+    for await (const entry of zipFile.eachEntry()) {
+      entryCount += 1;
+      if (entryCount > 1_024) throw new Error('DOCX contains too many package entries.');
+      const name = String(entry.fileName || '');
+      if (
+        !name
+        || name.includes('\\')
+        || name.startsWith('/')
+        || /^[A-Za-z]:/.test(name)
+        || name.split('/').some(segment => segment === '..')
+        || seenEntries.has(name)
+      ) {
+        throw new Error('DOCX contains an unsafe or duplicate package entry.');
+      }
+      if ((Number(entry.generalPurposeBitFlag || 0) & 0x1) !== 0) throw new Error('Encrypted DOCX entries are not accepted.');
+      if (Number(entry.uncompressedSize || 0) > 32 * 1024 * 1024) throw new Error('DOCX package entry is too large.');
+      totalUncompressedBytes += Number(entry.uncompressedSize || 0);
+      if (totalUncompressedBytes > 64 * 1024 * 1024) throw new Error('DOCX package expands beyond the accepted limit.');
+      seenEntries.add(name);
+    }
+  } catch {
+    return false;
+  } finally {
+    zipFile?.close();
+  }
+  return [...requiredEntries].every(entry => seenEntries.has(entry));
+}
+
+async function validateEvidenceUpload(file) {
   const mimeType = String(file?.mimeType || '').toLowerCase();
   const extension = path.extname(String(file?.originalName || '')).toLowerCase();
   const allowed = new Map([
@@ -607,6 +683,12 @@ function validateEvidenceUpload(file) {
   );
   if (!signatureMatches) {
     return { valid: false, code: 'upload_signature_mismatch', message: 'The file contents do not match the declared evidence type.' };
+  }
+  if (
+    mimeType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+    && !(await validateDocxPackage(bytes))
+  ) {
+    return { valid: false, code: 'invalid_docx_package', message: 'The DOCX file is not a valid, bounded Word OOXML package.' };
   }
   return { valid: true };
 }
@@ -746,7 +828,7 @@ function parseMultipartBody(buffer, contentType = '') {
 }
 
 async function storeUploadedFile(file) {
-  const validation = validateEvidenceUpload(file);
+  const validation = await validateEvidenceUpload(file);
   if (!validation.valid) {
     throw new UploadRequestError(415, validation.code, validation.message);
   }
@@ -2478,12 +2560,19 @@ function analyzeUploadPayload(payload = {}) {
 }
 
 let legacyStateForMigration = loadLegacyStateForMigration();
-const operatingLedger = new ContractorOperatingLedger({
-  dbFile: ledgerFile,
-  databaseUrl: hostedDatabaseUrl || null,
-  stateProvider: () => legacyStateForMigration,
-  logger: log
-});
+let operatingLedger;
+try {
+  runtimeProcessLock = runtimeProcessLockRequired ? acquireRuntimeLock(dataDir, { purpose: 'runtime' }) : null;
+  operatingLedger = new ContractorOperatingLedger({
+    dbFile: ledgerFile,
+    databaseUrl: hostedDatabaseUrl || null,
+    stateProvider: () => legacyStateForMigration,
+    logger: log
+  });
+} catch (error) {
+  runtimeProcessLock?.release();
+  throw error;
+}
 // The legacy JSON file is only an import source during construction. All live
 // reads and writes are ledger-backed after the synchronous migration completes.
 legacyStateForMigration = { jobs: [], workers: [], tools: [] };
@@ -7132,12 +7221,35 @@ app.post('/api/test/notifications', (req, res) => {
   });
 });
 
+function reserveEvidenceStorage(bytes) {
+  const requestedBytes = Math.max(0, Number(bytes || 0));
+  const usage = operatingLedger.evidenceStorageUsage();
+  if (!evidenceStorageMaxBytes) {
+    throw new UploadRequestError(503, 'evidence_storage_quota_unavailable', 'Evidence storage is unavailable because its cumulative quota is invalid.');
+  }
+  if (usage.bytes + pendingEvidenceStorageBytes + requestedBytes > evidenceStorageMaxBytes) {
+    throw new UploadRequestError(507, 'evidence_storage_quota_exceeded', 'The retained evidence storage quota has been reached. Archive or remove governed evidence before uploading more.', {
+      usageBytes: usage.bytes,
+      pendingBytes: pendingEvidenceStorageBytes,
+      requestedBytes,
+      maxBytes: evidenceStorageMaxBytes
+    });
+  }
+  pendingEvidenceStorageBytes += requestedBytes;
+  return requestedBytes;
+}
+
+function releaseEvidenceStorageReservation(bytes) {
+  pendingEvidenceStorageBytes = Math.max(0, pendingEvidenceStorageBytes - Math.max(0, Number(bytes || 0)));
+}
+
 // Ledger evidence intake accepts JSON metadata and bounded multipart uploads.
 app.post('/api/ledger/upload', async (req, res) => {
   let uploadPayload;
   let idempotency = null;
   let retainedUpload = null;
   let ledgerCommitted = false;
+  let reservedEvidenceBytes = 0;
   try {
     uploadPayload = await readUploadPayload(req, {
       authorizePayload(payload) {
@@ -7195,6 +7307,7 @@ app.post('/api/ledger/upload', async (req, res) => {
       throw new UploadRequestError(503, 'idempotency_claim_failed', 'The evidence retry identity could not be claimed safely.');
     }
 
+    reservedEvidenceBytes = uploadPayload.file ? reserveEvidenceStorage(uploadPayload.file.buffer?.length || 0) : 0;
     const storedFile = uploadPayload.file ? await storeUploadedFile(uploadPayload.file) : null;
     retainedUpload = storedFile;
     const payload = withStoredUpload(uploadPayload.payload || {}, storedFile);
@@ -7324,6 +7437,8 @@ app.post('/api/ledger/upload', async (req, res) => {
       );
     }
     throw error;
+  } finally {
+    releaseEvidenceStorageReservation(reservedEvidenceBytes);
   }
 });
 
@@ -7704,6 +7819,12 @@ function assertLocalBackupMode() {
 
 function backupOperationalState() {
   assertLocalBackupMode();
+  if (!backupSigningKeyValid) {
+    const error = new Error('Local backup creation requires CONTRACTOR_AI_BACKUP_SIGNING_KEY with at least 32 UTF-8 bytes.');
+    error.statusCode = 503;
+    error.code = 'backup_signing_key_required';
+    throw error;
+  }
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
   const backupRoot = path.join(dataDir, 'backups');
   const backupDir = path.join(backupRoot, timestamp);
@@ -7737,8 +7858,8 @@ function backupOperationalState() {
   fs.writeFileSync(exportFile, JSON.stringify(operationalExport(), null, 2));
   copied.push(path.relative(__dirname, exportFile).replace(/\\/g, '/'));
   manifestFiles.push({ file: path.basename(exportFile), bytes: fs.statSync(exportFile).size, sha256: sha256File(exportFile) });
-  const manifest = {
-    format: 'contractor-ai-backup-manifest/v2',
+  const manifest = signBackupManifest({
+    format: BACKUP_MANIFEST_V3,
     backupId: timestamp,
     createdAt: new Date().toISOString(),
     databaseMode: operatingLedger.databaseMode,
@@ -7750,7 +7871,7 @@ function backupOperationalState() {
       fileCount: evidenceBackup.entries.length
     },
     files: manifestFiles
-  };
+  }, backupSigningKey);
   const manifestFile = path.join(backupDir, 'manifest.json');
   fs.writeFileSync(manifestFile, JSON.stringify(manifest, null, 2));
   copied.push(path.relative(__dirname, manifestFile).replace(/\\/g, '/'));
@@ -7793,7 +7914,7 @@ function readBackupManifest(backupId) {
     throw error;
   }
   const manifest = JSON.parse(fs.readFileSync(manifestFile, 'utf8'));
-  if (!['contractor-ai-backup-manifest/v1', 'contractor-ai-backup-manifest/v2'].includes(manifest?.format) || !Array.isArray(manifest.files)) {
+  if (!['contractor-ai-backup-manifest/v1', 'contractor-ai-backup-manifest/v2', BACKUP_MANIFEST_V3].includes(manifest?.format) || !Array.isArray(manifest.files)) {
     const error = new Error('Backup manifest is invalid.');
     error.statusCode = 422;
     error.code = 'invalid_backup_manifest';
@@ -7805,7 +7926,14 @@ function readBackupManifest(backupId) {
     error.code = 'invalid_backup_manifest';
     throw error;
   }
-  if (manifest.format === 'contractor-ai-backup-manifest/v2') {
+  try {
+    verifyBackupManifestAuthenticity(manifest, backupSigningKey);
+  } catch (error) {
+    error.statusCode = 422;
+    error.code = 'backup_authenticity_failed';
+    throw error;
+  }
+  if (manifest.format === BACKUP_MANIFEST_V3) {
     const evidenceEntries = manifest.files.filter(entry => String(entry?.file || '').replace(/\\/g, '/').startsWith('evidence/'));
     if (manifest.databaseMode === 'sqlite' && (manifest.evidence?.included !== true || Number(manifest.evidence?.fileCount) !== evidenceEntries.length)) {
       const error = new Error('Backup evidence manifest is incomplete.');
@@ -7865,6 +7993,11 @@ function verifyOperationalBackup(backupId) {
     valid: failures.length === 0,
     checkedFiles: manifest.files.length,
     failures,
+    authenticity: {
+      authenticated: true,
+      algorithm: manifest.authenticity.algorithm,
+      keyId: manifest.authenticity.keyId
+    },
     providerBackupRequired: manifest.databaseMode === 'postgres'
   };
 }
@@ -7875,7 +8008,7 @@ function validateOperationalRestore(backupId) {
 
   const { backupDir, manifest } = readBackupManifest(backupId);
   const failures = [...verification.failures];
-  if (manifest.format !== 'contractor-ai-backup-manifest/v2') {
+  if (manifest.format !== BACKUP_MANIFEST_V3) {
     failures.push({ file: 'manifest.json', reason: 'legacy_manifest_not_restorable' });
   }
   if (manifest.databaseMode !== 'sqlite') {
@@ -8196,7 +8329,7 @@ app.post('/api/operations/restore/validate', (req, res) => {
   if (req.body?.snapshot || req.body?.format) {
     return sendError(req, res, 422, 'operational_export_not_restorable', 'Operational exports are reconciliation artifacts and cannot be used as restore packages.', {
       exportValidationEndpoint: '/api/operations/exports/validate',
-      requiredArtifact: 'contractor-ai-backup-manifest/v2'
+      requiredArtifact: BACKUP_MANIFEST_V3
     });
   }
   const backupId = String(req.body?.backupId || '').trim();
@@ -9403,7 +9536,11 @@ function shutdownRuntime({ server = directServer, signal = 'shutdown', timeoutMs
     const timersCleared = clearAutonomousSchedulerTimers();
     log('info', 'runtime_shutdown_started', { signal, timersCleared });
     const http = await closeHttpServer(server, timeoutMs);
-    operatingLedger.close();
+    try {
+      operatingLedger.close();
+    } finally {
+      runtimeProcessLock?.release();
+    }
     log('info', 'runtime_shutdown_completed', { signal, timersCleared, http });
     return { signal, timersCleared, http };
   })().catch(error => {

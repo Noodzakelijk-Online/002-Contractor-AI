@@ -9,6 +9,7 @@ const { spawnSync } = require('node:child_process');
 const { Client } = require('pg');
 const { ContractorOperatingLedger, BID_DECISION_CRITERIA, BID_DECISION_GATES, PRICING_BASIS_FACTORS } = require('../operating-ledger');
 const { resolvePostgresConnectionOptions } = require('../postgres-sync-database');
+const { BACKUP_MANIFEST_V3, signBackupManifest } = require('../backup-manifest');
 const { approveLowRiskRegister } = require('./risk-register-fixture');
 const {
   migrateLocalBackupToHosted,
@@ -19,6 +20,8 @@ const {
 } = require('../scripts/migrate-local-backup-to-hosted');
 
 const connectionString = process.env.CONTRACTOR_AI_POSTGRES_TEST_URL;
+const backupSigningKey = 'contractor-ai-hosted-migration-test-signing-key-2026';
+process.env.CONTRACTOR_AI_BACKUP_SIGNING_KEY = backupSigningKey;
 
 function approveCommercialScope(ledger, jobId, suffix, actor = 'migration_fixture') {
   const requested = ledger.requestCommercialScopeRevision(jobId, {
@@ -1068,14 +1071,14 @@ function createBackupFixture(t, suffix = 'success') {
     bytes: fs.statSync(entry.target).size,
     sha256: digest(entry.target)
   }));
-  fs.writeFileSync(path.join(backupDir, 'manifest.json'), JSON.stringify({
-    format: 'contractor-ai-backup-manifest/v2',
+  fs.writeFileSync(path.join(backupDir, 'manifest.json'), JSON.stringify(signBackupManifest({
+    format: BACKUP_MANIFEST_V3,
     backupId,
     createdAt: '2026-07-13T12:00:00.000Z',
     databaseMode: 'sqlite',
     evidence: { included: true, fileCount: 4 },
     files
-  }, null, 2));
+  }, backupSigningKey), null, 2));
   return { attendanceSession, availabilityPeriod, backupDir, backupId, bidCommitment, bidJob, bidOrderPackage, bidPackage, billingMilestone, clientFeedback, commercialScope, controlledDocument, convertedTakeoff, costForecast, dataSubjectRequest, daywork, document, drawingDocument, drawingEvidenceBytes, drawingRevision, drawingStorageRef, energyDocument, energyEvidenceBytes, energyPerformance, energyStorageRef, environmentalActivity, environmentalReport, equipmentCustody, estimateRatePolicy, evidenceBytes, expenseReceipt, fiveSAudit, fiveSLocation, fiveSStandard, fiveSTool, handover, job, localStorageRef, managedOperator, managedOperatorAccessKey, materialReceipt, nonconformance, operatorPreference, organization, preTaskPlan, pricingDecision, productionBaseline, productionEntry, projectMeeting, pursuitDecision, pursuitOpportunity, qualificationRequirement, riskRegister, scheduleBaseline, sdsDocument, sdsEvidenceBytes, sdsRevision, sdsStorageRef, supplierInvoice, supplierPayment, takeoff, taskDependency, timesheetExport, timesheetPeriodStart, tradePartner, weeklyTimesheet, workerCredential };
 }
 
@@ -1107,7 +1110,7 @@ class FakeHostedStorage {
   }
 }
 
-test('backup verifier requires an intact v2 SQLite ledger and evidence set', t => {
+test('backup verifier requires an authentic v3 SQLite ledger and intact evidence set', t => {
   const fixture = createBackupFixture(t, 'verify');
   const verified = verifyBackupDirectory(fixture.backupDir);
   assert.equal(verified.manifest.backupId, fixture.backupId);

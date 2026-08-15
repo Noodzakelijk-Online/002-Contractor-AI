@@ -219,6 +219,7 @@ async function main() {
     '--env', 'CONTRACTOR_AI_STORAGE_MODE=local',
     '--env', 'CONTRACTOR_AI_REQUIRE_AUTH=true',
     '--env', `CONTRACTOR_AI_AUTH_TOKEN=${authToken}`,
+    '--env', 'CONTRACTOR_AI_BACKUP_SIGNING_KEY=contractor-ai-container-test-backup-signing-key-at-least-32-characters',
     '--env', 'CONTRACTOR_AI_AUTONOMOUS_SCHEDULER_ENABLED=false',
     imageTag
   ]);

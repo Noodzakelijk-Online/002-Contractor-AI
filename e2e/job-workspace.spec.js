@@ -2806,7 +2806,7 @@ test('operations distinguishes checksummed exports from restorable local backups
   const backupsResponse = await request.get('/api/operations/backups');
   expect(backupsResponse.ok()).toBeTruthy();
   const backups = await backupsResponse.json();
-  expect(backups.backups[0].format).toBe('contractor-ai-backup-manifest/v2');
+  expect(backups.backups[0].format).toBe('contractor-ai-backup-manifest/v3');
   expect(backups.backups[0].evidenceFiles).toBeGreaterThan(0);
   expect(backups.backups[0].downloadAvailable).toBeTruthy();
   await page.getByRole('button', { name: `Check restore for backup ${backups.backups[0].backupId}` }).click();

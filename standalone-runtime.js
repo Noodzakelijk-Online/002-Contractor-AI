@@ -5,6 +5,7 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
 const STANDALONE_CONFIG_FORMAT = 'contractor-ai-windows-standalone/v1';
+const DEFAULT_EVIDENCE_STORAGE_MAX_BYTES = 20 * 1024 * 1024 * 1024;
 
 function standaloneRoot(environment = process.env) {
   const configured = String(environment.CONTRACTOR_AI_STANDALONE_ROOT || '').trim();
@@ -56,12 +57,24 @@ function ensureStandaloneConfig(options = {}) {
   let config;
   try {
     config = readStandaloneConfig(paths.configFile);
+    let upgraded = false;
+    if (typeof config.backupSigningKey !== 'string' || Buffer.byteLength(config.backupSigningKey, 'utf8') < 32) {
+      config.backupSigningKey = crypto.randomBytes(32).toString('base64url');
+      upgraded = true;
+    }
+    if (!Number.isSafeInteger(config.evidenceStorageMaxBytes) || config.evidenceStorageMaxBytes <= 0) {
+      config.evidenceStorageMaxBytes = DEFAULT_EVIDENCE_STORAGE_MAX_BYTES;
+      upgraded = true;
+    }
+    if (upgraded) fs.writeFileSync(paths.configFile, `${JSON.stringify(config, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
   } catch (error) {
     if (error.code !== 'ENOENT') throw error;
     created = true;
     config = {
       format: STANDALONE_CONFIG_FORMAT,
       ownerToken: crypto.randomBytes(32).toString('base64url'),
+      backupSigningKey: crypto.randomBytes(32).toString('base64url'),
+      evidenceStorageMaxBytes: DEFAULT_EVIDENCE_STORAGE_MAX_BYTES,
       port: validPort(options.port || options.environment?.PORT || process.env.PORT),
       createdAt: new Date().toISOString()
     };
@@ -81,6 +94,8 @@ function applyStandaloneEnvironment(options = {}) {
     CONTRACTOR_AI_STORAGE_MODE: 'local',
     CONTRACTOR_AI_REQUIRE_AUTH: 'true',
     CONTRACTOR_AI_AUTH_TOKEN: runtime.config.ownerToken,
+    CONTRACTOR_AI_BACKUP_SIGNING_KEY: runtime.config.backupSigningKey,
+    CONTRACTOR_AI_EVIDENCE_STORAGE_MAX_BYTES: String(runtime.config.evidenceStorageMaxBytes),
     CONTRACTOR_AI_BIND_HOST: '127.0.0.1',
     CONTRACTOR_AI_DATA_DIR: runtime.paths.dataDir,
     LEDGER_DB_FILE: runtime.paths.ledgerFile,
@@ -93,6 +108,7 @@ function applyStandaloneEnvironment(options = {}) {
 
 module.exports = {
   STANDALONE_CONFIG_FORMAT,
+  DEFAULT_EVIDENCE_STORAGE_MAX_BYTES,
   applyStandaloneEnvironment,
   ensureStandaloneConfig,
   readStandaloneConfig,

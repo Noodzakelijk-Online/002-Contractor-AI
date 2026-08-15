@@ -6,6 +6,8 @@ const { Graph, alg: graphAlgorithms } = require('@dagrejs/graphlib');
 const { PostgresSyncDatabase } = require('./postgres-sync-database');
 const { getFrameworkDefinition, listFrameworkCatalog } = require('./framework-catalog');
 
+const DASHBOARD_SUMMARY_CACHE_TTL_MS = 2_000;
+
 const LEDGER_CAPABILITY_BLUEPRINT = [
   {
     key: 'preconstruction',
@@ -6136,6 +6138,8 @@ class ContractorOperatingLedger {
     this.logger = typeof logger === 'function' ? logger : () => {};
     this.clock = typeof clock === 'function' ? clock : () => new Date();
     this.transactionDepth = 0;
+    this.mutationRevision = 0;
+    this.dashboardSummaryCache = null;
     if (databaseUrl) {
       this.db = new PostgresSyncDatabase({ connectionString: databaseUrl });
     } else {
@@ -8791,6 +8795,8 @@ class ContractorOperatingLedger {
     try {
       const result = callback();
       this.db.exec('COMMIT');
+      this.mutationRevision += 1;
+      this.dashboardSummaryCache = null;
       return result;
     } catch (error) {
       this.db.exec('ROLLBACK');
@@ -8802,6 +8808,25 @@ class ContractorOperatingLedger {
 
   count(table) {
     return Number(this.db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get().count || 0);
+  }
+
+  evidenceStorageUsage() {
+    const usage = this.db.prepare(`
+      SELECT COALESCE(SUM(size_bytes), 0) AS bytes, COUNT(*) AS objects
+      FROM (
+        SELECT storage_ref, MAX(size_bytes) AS size_bytes
+        FROM (
+          SELECT storage_ref, size_bytes FROM documents WHERE storage_ref IS NOT NULL AND storage_ref <> ''
+          UNION ALL
+          SELECT storage_ref, size_bytes FROM opportunity_evidence WHERE storage_ref IS NOT NULL AND storage_ref <> ''
+        ) retained_evidence
+        GROUP BY storage_ref
+      ) unique_evidence
+    `).get();
+    return {
+      bytes: Number(usage?.bytes || 0),
+      objects: Number(usage?.objects || 0)
+    };
   }
 
   qaResetInventory() {
@@ -55678,6 +55703,14 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
   }
 
   dashboardSummary() {
+    const cache = this.dashboardSummaryCache;
+    if (
+      cache
+      && cache.revision === this.mutationRevision
+      && Date.now() - cache.createdAtMs < DASHBOARD_SUMMARY_CACHE_TTL_MS
+    ) {
+      return cache.summary;
+    }
     const toolReservationConflicts = this.detectToolReservationConflicts(100);
     const assignmentConflicts = this.detectAssignmentConflicts(100);
     const workerAvailabilityConflicts = this.detectWorkerAvailabilityConflicts(100);
@@ -55924,7 +55957,7 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
     `).get(nowIso(), nowIso());
     const nextActions = this.nextActions();
     const capabilityMap = this.ledgerCapabilityCoverage();
-    return {
+    const summary = {
       generatedAt: nowIso(),
       dbFile: this.dbFile,
       metrics,
@@ -55994,6 +56027,12 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       capabilitySummary: capabilityMap.summary,
       preconstruction: opportunityPipeline
     };
+    this.dashboardSummaryCache = {
+      revision: this.mutationRevision,
+      createdAtMs: Date.now(),
+      summary
+    };
+    return summary;
   }
 
   nextActions(options = {}) {

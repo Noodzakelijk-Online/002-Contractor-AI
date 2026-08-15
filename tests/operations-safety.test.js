@@ -49,6 +49,7 @@ function loadServer(overrides = {}) {
     CONTRACTOR_AI_TRUST_PROXY: '',
     CONTRACTOR_AI_AUTONOMOUS_SCHEDULER_ENABLED: 'false',
     CONTRACTOR_AI_RETENTION_POLICY_REFERENCE: '',
+    CONTRACTOR_AI_BACKUP_SIGNING_KEY: 'contractor-ai-operations-test-backup-signing-key-2026',
     ...overrides
   });
   if (!Object.prototype.hasOwnProperty.call(overrides, 'CONTRACTOR_AI_DATABASE_URL')) delete process.env.CONTRACTOR_AI_DATABASE_URL;
@@ -207,6 +208,7 @@ test('operational export and backup are local, auditable maintenance controls', 
   });
   assert.equal(wrongRestoreArtifact.response.status, 422);
   assert.equal(wrongRestoreArtifact.body.error.code, 'operational_export_not_restorable');
+  assert.equal(wrongRestoreArtifact.body.error.details.requiredArtifact, 'contractor-ai-backup-manifest/v3');
 
   const evidenceSource = path.join(process.env.UPLOAD_DIR, '2026-07', 'retained-site-proof.jpg');
   fs.mkdirSync(path.dirname(evidenceSource), { recursive: true });
@@ -220,7 +222,9 @@ test('operational export and backup are local, auditable maintenance controls', 
   assert.ok(backup.body.backup.backupId);
   const backupDirectory = path.join(path.dirname(process.env.STATE_FILE), 'backups', backup.body.backup.backupId);
   const backupManifest = JSON.parse(fs.readFileSync(path.join(backupDirectory, 'manifest.json'), 'utf8'));
-  assert.equal(backupManifest.format, 'contractor-ai-backup-manifest/v2');
+  assert.equal(backupManifest.format, 'contractor-ai-backup-manifest/v3');
+  assert.equal(backupManifest.authenticity.algorithm, 'hmac-sha256');
+  assert.match(backupManifest.authenticity.signature, /^[a-f0-9]{64}$/);
   assert.deepEqual(backupManifest.evidence, { included: true, fileCount: 1 });
   assert.ok(backupManifest.files.some(file => file.file === 'evidence/2026-07/retained-site-proof.jpg'));
   assert.ok(fs.existsSync(path.join(backupDirectory, 'evidence', '2026-07', 'retained-site-proof.jpg')));
@@ -265,9 +269,8 @@ test('operational export and backup are local, auditable maintenance controls', 
     files: [...backupManifest.files, { file: '../outside.txt', bytes: 0, sha256: '0'.repeat(64) }]
   }, null, 2));
   const unsafeDownload = await request(baseUrl, `/api/operations/backups/${encodeURIComponent(backup.body.backup.backupId)}/download`);
-  assert.equal(unsafeDownload.response.status, 409);
-  assert.equal(unsafeDownload.body.error.code, 'backup_integrity_failed');
-  assert.ok(unsafeDownload.body.verification.failures.some(failure => failure.file === '../outside.txt' && failure.reason === 'unsafe_manifest_path'));
+  assert.equal(unsafeDownload.response.status, 422);
+  assert.equal(unsafeDownload.body.error.code, 'backup_authenticity_failed');
   fs.writeFileSync(path.join(backupDirectory, 'manifest.json'), JSON.stringify(backupManifest, null, 2));
 
   fs.appendFileSync(path.join(backupDirectory, 'evidence', '2026-07', 'retained-site-proof.jpg'), 'tampered');

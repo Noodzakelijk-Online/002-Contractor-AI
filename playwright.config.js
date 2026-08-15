@@ -25,6 +25,7 @@ const browserRoleTokens = JSON.stringify({
     workerId: 'browser-field-task-worker'
   }
 });
+const browserBackupSigningKey = 'contractor-ai-browser-test-backup-signing-key-at-least-32-characters';
 
 module.exports = defineConfig({
   testDir: './e2e',
@@ -62,6 +63,7 @@ module.exports = defineConfig({
         UPLOAD_DIR: path.join(localRuntimeDirectory, 'uploads'),
         CONTRACTOR_AI_REQUIRE_AUTH: 'false',
         CONTRACTOR_AI_AUTH_TOKEN: '',
+        CONTRACTOR_AI_BACKUP_SIGNING_KEY: browserBackupSigningKey,
         CONTRACTOR_AI_ROLE_TOKENS: '',
         CONTRACTOR_AI_HAI_FEED_PATH: path.join(localRuntimeDirectory, 'connected-sources', 'contractor-ai.json'),
         CONTRACTOR_AI_RATE_LIMIT: process.env.CONTRACTOR_AI_RATE_LIMIT || '10000',
@@ -81,6 +83,7 @@ module.exports = defineConfig({
         UPLOAD_DIR: path.join(authRuntimeDirectory, 'uploads'),
         CONTRACTOR_AI_REQUIRE_AUTH: 'true',
         CONTRACTOR_AI_AUTH_TOKEN: '',
+        CONTRACTOR_AI_BACKUP_SIGNING_KEY: browserBackupSigningKey,
         CONTRACTOR_AI_ROLE_TOKENS: browserRoleTokens,
         CONTRACTOR_AI_HAI_FEED_PATH: path.join(authRuntimeDirectory, 'connected-sources', 'contractor-ai.json'),
         CONTRACTOR_AI_RATE_LIMIT: process.env.CONTRACTOR_AI_RATE_LIMIT || '10000'

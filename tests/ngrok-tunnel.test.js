@@ -222,6 +222,7 @@ test('ngrok lifecycle verifies the real production readiness projection through 
     CONTRACTOR_AI_RUNTIME_MODE: 'local',
     CONTRACTOR_AI_STORAGE_MODE: 'local',
     CONTRACTOR_AI_AUTH_TOKEN: 'contractor-runtime-owner-token-at-least-32-characters',
+    CONTRACTOR_AI_BACKUP_SIGNING_KEY: 'contractor-ai-ngrok-test-backup-signing-key-at-least-32-characters',
     CONTRACTOR_AI_ROLE_TOKENS: '',
     CONTRACTOR_AI_DATA_DIR: directory,
     LEDGER_DB_FILE: path.join(directory, 'ledger.sqlite'),

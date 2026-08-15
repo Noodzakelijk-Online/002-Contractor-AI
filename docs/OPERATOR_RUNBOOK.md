@@ -91,9 +91,13 @@ tar -xzf contractor-ai-backup-<backup-id>.tar.gz -C ./data/backups
 npm run restore:local -- --backup-id <backup-id> --confirm RESTORE_<backup-id>
 ```
 
-The command checks the manifest, checksums, SQLite integrity, canonical tables, and
-private evidence. It creates a pre-restore recovery package and revokes restored
-browser sessions. Restart the process after success.
+The command requires the same `CONTRACTOR_AI_BACKUP_SIGNING_KEY` used to create the
+backup. It acquires an exclusive runtime lease, authenticates the manifest, checks
+checksums, SQLite integrity, canonical tables, and private evidence, then stages the
+whole recovery set. It creates a pre-restore recovery package, rolls back database
+and evidence together on failure, and revokes restored browser sessions. Restart the
+process after success. Historical unsigned v1/v2 packages require the explicit
+`--allow-legacy-unsigned` compatibility flag.
 
 ## Release verification
 

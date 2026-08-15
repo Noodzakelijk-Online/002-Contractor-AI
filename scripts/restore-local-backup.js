@@ -4,6 +4,8 @@ const os = require('node:os');
 const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
 const { AUDIT_CHAIN_ID, verifyAuditChainRows } = require('../operating-ledger');
+const { BACKUP_MANIFEST_V3, verifyBackupManifestAuthenticity } = require('../backup-manifest');
+const { acquireRuntimeLock } = require('../runtime-lock');
 
 const projectRoot = path.resolve(__dirname, '..');
 
@@ -46,13 +48,18 @@ function safeManifestTarget(root, manifestPath) {
   return target;
 }
 
-function verifyManifest(backupDir) {
+function verifyManifest(backupDir, options = {}) {
   const manifestFile = path.join(backupDir, 'manifest.json');
   if (!fs.existsSync(manifestFile)) throw new Error('Backup manifest was not found.');
   const manifest = JSON.parse(fs.readFileSync(manifestFile, 'utf8'));
-  if (!['contractor-ai-backup-manifest/v1', 'contractor-ai-backup-manifest/v2'].includes(manifest?.format) || !Array.isArray(manifest.files)) {
+  if (!['contractor-ai-backup-manifest/v1', 'contractor-ai-backup-manifest/v2', BACKUP_MANIFEST_V3].includes(manifest?.format) || !Array.isArray(manifest.files)) {
     throw new Error('Backup manifest is invalid.');
   }
+  verifyBackupManifestAuthenticity(
+    manifest,
+    options.signingKey || process.env.CONTRACTOR_AI_BACKUP_SIGNING_KEY,
+    { allowLegacyUnsigned: options.allowLegacyUnsigned === true }
+  );
   for (const entry of manifest.files) {
     const file = String(entry?.file || '');
     const target = safeManifestTarget(backupDir, file);
@@ -63,7 +70,7 @@ function verifyManifest(backupDir) {
       throw new Error(`Backup checksum failed: ${file}`);
     }
   }
-  if (manifest.format === 'contractor-ai-backup-manifest/v2') {
+  if (manifest.format === 'contractor-ai-backup-manifest/v2' || manifest.format === BACKUP_MANIFEST_V3) {
     const evidenceEntries = manifest.files.filter(entry => String(entry?.file || '').replace(/\\/g, '/').startsWith('evidence/'));
     if (manifest.databaseMode === 'sqlite' && (manifest.evidence?.included !== true || Number(manifest.evidence?.fileCount) !== evidenceEntries.length)) {
       throw new Error('Backup evidence manifest is incomplete.');
@@ -1781,12 +1788,15 @@ function assertSafeReplaceDirectory(target, backupRoot) {
   return resolved;
 }
 
-function restore(argumentsMap) {
+function restoreWithLockHeld(argumentsMap) {
   const dataDir = path.resolve(argumentsMap['data-dir'] || process.env.CONTRACTOR_AI_DATA_DIR || path.join(projectRoot, 'data'));
   const backupId = String(argumentsMap['backup-id'] || '');
   if (argumentsMap.confirm !== `RESTORE_${backupId}`) throw new Error(`Set --confirm RESTORE_${backupId} to apply this verified local backup.`);
   const { backupRoot, backupDir } = safeBackupDirectory(dataDir, backupId);
-  const manifest = verifyManifest(backupDir);
+  const manifest = verifyManifest(backupDir, {
+    signingKey: argumentsMap['signing-key'],
+    allowLegacyUnsigned: argumentsMap['allow-legacy-unsigned'] === true
+  });
   if (manifest.databaseMode !== 'sqlite') throw new Error('This command restores SQLite local backups only. Restore hosted PostgreSQL through the managed provider recovery procedure.');
 
   const stateFile = path.resolve(argumentsMap['state-file'] || process.env.STATE_FILE || path.join(dataDir, 'server-state.json'));
@@ -1798,8 +1808,36 @@ function restore(argumentsMap) {
   for (const file of requiredFiles) {
     if (!manifestFiles.has(file)) throw new Error(`Backup does not contain required local state file: ${file}`);
   }
-  const backupLedgerFile = path.join(backupDir, path.basename(ledgerFile));
-  const databaseVerification = verifySqliteBackupDatabase(backupLedgerFile);
+  const stagingRoot = path.join(dataDir, `.restore-staging-${process.pid}-${Date.now()}`);
+  const stagedFilesDir = path.join(stagingRoot, 'files');
+  const stagedEvidenceDir = path.join(stagingRoot, 'evidence');
+  fs.rmSync(stagingRoot, { recursive: true, force: true });
+  fs.mkdirSync(stagedFilesDir, { recursive: true });
+  const restoredFiles = [];
+  for (const target of targetFiles) {
+    const filename = path.basename(target);
+    if (!manifestFiles.has(filename)) continue;
+    fs.copyFileSync(path.join(backupDir, filename), path.join(stagedFilesDir, filename));
+    restoredFiles.push(filename);
+  }
+
+  const evidenceIncluded = (manifest.format === 'contractor-ai-backup-manifest/v2' || manifest.format === BACKUP_MANIFEST_V3)
+    && manifest.evidence?.included === true;
+  let restoredEvidenceFiles = 0;
+  if (evidenceIncluded) {
+    fs.mkdirSync(stagedEvidenceDir, { recursive: true });
+    const evidenceEntries = manifest.files.filter(entry => String(entry.file).replace(/\\/g, '/').startsWith('evidence/'));
+    for (const entry of evidenceEntries) {
+      const relative = String(entry.file).replace(/\\/g, '/').slice('evidence/'.length);
+      const source = safeManifestTarget(backupDir, entry.file);
+      const target = safeManifestTarget(stagedEvidenceDir, relative);
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.copyFileSync(source, target);
+      restoredEvidenceFiles += 1;
+    }
+  }
+  const stagedLedgerFile = path.join(stagedFilesDir, path.basename(ledgerFile));
+  const databaseVerification = verifySqliteBackupDatabase(stagedLedgerFile);
 
   const safetyId = `pre-restore-${new Date().toISOString().replace(/[:.]/g, '-')}`;
   const safetyDir = path.join(backupRoot, safetyId);
@@ -1814,47 +1852,64 @@ function restore(argumentsMap) {
   copiedSafetyFiles.push(...copyDirectoryFiles(uploadDir, path.join(safetyDir, 'evidence')));
   writeSafetyManifest(safetyDir, copiedSafetyFiles);
 
-  const restoredFiles = [];
-  for (const target of targetFiles) {
-    const filename = path.basename(target);
-    const source = path.join(backupDir, filename);
-    if (manifestFiles.has(filename)) {
-      fs.mkdirSync(path.dirname(target), { recursive: true });
-      fs.copyFileSync(source, target);
-      restoredFiles.push(filename);
-    } else if (target.endsWith('-wal') || target.endsWith('-shm')) {
-      fs.rmSync(target, { force: true });
-    }
-  }
-  const invalidatedOperatorSessions = invalidateRestoredOperatorSessions(ledgerFile);
-  const clearedAuthenticationRateLimits = clearRestoredAuthenticationRateLimits(ledgerFile);
-  const clearedApiRateLimits = clearRestoredApiRateLimits(ledgerFile);
-  const deactivatedManagedOperators = deactivateRestoredManagedOperators(ledgerFile);
-
   let evidenceRestored = false;
-  let restoredEvidenceFiles = 0;
-  if (manifest.format === 'contractor-ai-backup-manifest/v2' && manifest.evidence?.included === true) {
-    const stagingDir = `${uploadDir}.restore-${process.pid}-${Date.now()}`;
-    assertSafeReplaceDirectory(stagingDir, backupRoot);
-    fs.rmSync(stagingDir, { recursive: true, force: true });
-    fs.mkdirSync(stagingDir, { recursive: true });
-    try {
-      const evidenceEntries = manifest.files.filter(entry => String(entry.file).replace(/\\/g, '/').startsWith('evidence/'));
-      for (const entry of evidenceEntries) {
-        const relative = String(entry.file).replace(/\\/g, '/').slice('evidence/'.length);
-        const source = safeManifestTarget(backupDir, entry.file);
-        const target = safeManifestTarget(stagingDir, relative);
+  let invalidatedOperatorSessions = 0;
+  let clearedAuthenticationRateLimits = 0;
+  let clearedApiRateLimits = 0;
+  let deactivatedManagedOperators = 0;
+  try {
+    for (const target of targetFiles) {
+      const filename = path.basename(target);
+      const source = path.join(stagedFilesDir, filename);
+      if (manifestFiles.has(filename)) {
         fs.mkdirSync(path.dirname(target), { recursive: true });
         fs.copyFileSync(source, target);
-        restoredEvidenceFiles += 1;
+      } else if (target.endsWith('-wal') || target.endsWith('-shm')) {
+        fs.rmSync(target, { force: true });
       }
+    }
+    if (evidenceIncluded) {
       fs.rmSync(uploadDir, { recursive: true, force: true });
       fs.mkdirSync(path.dirname(uploadDir), { recursive: true });
-      fs.renameSync(stagingDir, uploadDir);
+      fs.renameSync(stagedEvidenceDir, uploadDir);
       evidenceRestored = true;
-    } finally {
-      fs.rmSync(stagingDir, { recursive: true, force: true });
     }
+    invalidatedOperatorSessions = invalidateRestoredOperatorSessions(ledgerFile);
+    clearedAuthenticationRateLimits = clearRestoredAuthenticationRateLimits(ledgerFile);
+    clearedApiRateLimits = clearRestoredApiRateLimits(ledgerFile);
+    deactivatedManagedOperators = deactivateRestoredManagedOperators(ledgerFile);
+  } catch (error) {
+    const rollbackFailures = [];
+    for (const target of targetFiles) {
+      const safetyTarget = path.join(safetyDir, path.basename(target));
+      try {
+        if (fs.existsSync(safetyTarget)) {
+          fs.mkdirSync(path.dirname(target), { recursive: true });
+          fs.copyFileSync(safetyTarget, target);
+        } else {
+          fs.rmSync(target, { force: true });
+        }
+      } catch (rollbackError) {
+        rollbackFailures.push(`${path.basename(target)}: ${rollbackError.message}`);
+      }
+    }
+    if (evidenceIncluded) {
+      try {
+        fs.rmSync(uploadDir, { recursive: true, force: true });
+        const safetyEvidenceDir = path.join(safetyDir, 'evidence');
+        if (fs.existsSync(safetyEvidenceDir)) copyDirectoryFiles(safetyEvidenceDir, uploadDir);
+      } catch (rollbackError) {
+        rollbackFailures.push(`evidence: ${rollbackError.message}`);
+      }
+    }
+    if (rollbackFailures.length) {
+      const rollbackError = new Error(`Restore failed and rollback was incomplete: ${rollbackFailures.join('; ')}`);
+      rollbackError.cause = error;
+      throw rollbackError;
+    }
+    throw error;
+  } finally {
+    fs.rmSync(stagingRoot, { recursive: true, force: true });
   }
 
   return {
@@ -1871,6 +1926,18 @@ function restore(argumentsMap) {
     preRestoreBackupId: safetyId,
     restartRequired: true
   };
+}
+
+function restore(argumentsMap) {
+  const dataDir = path.resolve(argumentsMap['data-dir'] || process.env.CONTRACTOR_AI_DATA_DIR || path.join(projectRoot, 'data'));
+  const backupId = String(argumentsMap['backup-id'] || '');
+  if (argumentsMap.confirm !== `RESTORE_${backupId}`) throw new Error(`Set --confirm RESTORE_${backupId} to apply this verified local backup.`);
+  const recoveryLock = acquireRuntimeLock(dataDir, { purpose: 'restore' });
+  try {
+    return restoreWithLockHeld(argumentsMap);
+  } finally {
+    recoveryLock.release();
+  }
 }
 
 if (require.main === module) {

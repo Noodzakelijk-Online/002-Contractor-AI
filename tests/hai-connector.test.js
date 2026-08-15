@@ -159,6 +159,7 @@ test('HAI API is owner-only and returns the generic JSON root array', async () =
   };
   Object.assign(process.env, {
     NODE_ENV: 'production',
+    CONTRACTOR_AI_BACKUP_SIGNING_KEY: 'contractor-ai-hai-test-backup-signing-key-at-least-32-characters',
     CONTRACTOR_AI_ROLE_TOKENS: JSON.stringify(tokens),
     CONTRACTOR_AI_DATA_DIR: directory,
     LEDGER_DB_FILE: path.join(directory, 'ledger.sqlite'),

@@ -6,12 +6,24 @@ const path = require('node:path');
 
 const { riskRegisterPayload } = require('./risk-register-fixture');
 
+const TEST_BACKUP_SIGNING_KEY = 'contractor-ai-auth-test-backup-signing-key-at-least-32-characters';
+
 function loadServerWithEnv(env = {}) {
   const stateDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'contractor-ai-auth-'));
   process.env.STATE_FILE = path.join(stateDirectory, 'state.json');
   process.env.LEDGER_DB_FILE = path.join(stateDirectory, 'ledger.sqlite');
   process.env.UPLOAD_DIR = path.join(stateDirectory, 'uploads');
   process.env.NODE_ENV = env.NODE_ENV || 'test';
+
+  if (env.CONTRACTOR_AI_BACKUP_SIGNING_KEY === undefined) {
+    if (process.env.NODE_ENV === 'production') {
+      process.env.CONTRACTOR_AI_BACKUP_SIGNING_KEY = TEST_BACKUP_SIGNING_KEY;
+    } else {
+      delete process.env.CONTRACTOR_AI_BACKUP_SIGNING_KEY;
+    }
+  } else {
+    process.env.CONTRACTOR_AI_BACKUP_SIGNING_KEY = env.CONTRACTOR_AI_BACKUP_SIGNING_KEY;
+  }
 
   if (env.CONTRACTOR_AI_REQUIRE_AUTH === undefined) {
     delete process.env.CONTRACTOR_AI_REQUIRE_AUTH;

@@ -39,6 +39,7 @@ const REQUIRED_PATHS = [
   'docs/UI_ACTION_AUDIT.md',
   'docs/WINDOWS_STANDALONE.md',
   'docker-compose.hosted.yml',
+  'backup-manifest.js',
   'evidence-storage.js',
   'e2e/accessibility-helpers.js',
   'e2e/accessibility.spec.js',
@@ -52,6 +53,7 @@ const REQUIRED_PATHS = [
   'operating-ledger.js',
   'postgres-sync-database.js',
   'postgres-sync-worker.js',
+  'runtime-lock.js',
   'server.js',
   'standalone-launcher.js',
   'standalone-runtime.js',
@@ -313,13 +315,30 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
   const teamAccessSource = fs.readFileSync(path.join(root, 'components', 'TeamAccessControl.jsx'), 'utf8');
   const privacyRequestSource = fs.readFileSync(path.join(root, 'components', 'PrivacyRequestsControl.jsx'), 'utf8');
   const restoreSource = fs.readFileSync(path.join(root, 'scripts', 'restore-local-backup.js'), 'utf8');
+  const backupManifestSource = fs.readFileSync(path.join(root, 'backup-manifest.js'), 'utf8');
+  const runtimeLockSource = fs.readFileSync(path.join(root, 'runtime-lock.js'), 'utf8');
   const hostedMigrationSource = fs.readFileSync(path.join(root, 'scripts', 'migrate-local-backup-to-hosted.js'), 'utf8');
   const dockerSource = fs.readFileSync(path.join(root, 'Dockerfile'), 'utf8');
   const windowsPackageSource = fs.readFileSync(path.join(root, 'scripts', 'build-windows-standalone.js'), 'utf8');
   const windowsPackageVerificationSource = fs.readFileSync(path.join(root, 'scripts', 'verify-windows-standalone.js'), 'utf8');
+  for (const backupControl of ['hmac-sha256', 'timingSafeEqual', 'BACKUP_MANIFEST_V3']) {
+    if (!backupManifestSource.includes(backupControl)) failures.push(`Backup manifest authentication is missing: ${backupControl}`);
+  }
+  for (const restoreControl of ['acquireRuntimeLock', 'stagingRoot', 'rollbackFailures']) {
+    if (!restoreSource.includes(restoreControl)) failures.push(`Stopped-runtime atomic restore is missing: ${restoreControl}`);
+  }
+  for (const runtimeLockControl of ["flag: 'wx'", 'processStartedAt', 'leaseId']) {
+    if (!runtimeLockSource.includes(runtimeLockControl)) failures.push(`Runtime exclusion lease is missing: ${runtimeLockControl}`);
+  }
+  for (const evidenceControl of ['CONTRACTOR_AI_EVIDENCE_STORAGE_MAX_BYTES', 'reserveEvidenceStorage', 'evidenceStorageUsage']) {
+    if (!serverSource.includes(evidenceControl) && !ledgerSource.includes(evidenceControl)) {
+      failures.push(`Cumulative evidence storage control is missing: ${evidenceControl}`);
+    }
+  }
   for (const lockedRuntimeRequirement of [
     'prepareTarget(resolvedTarget)',
-    "error?.code !== 'EPERM'",
+    'isReusableRuntimeLockError(error)',
+    "['EBUSY', 'EPERM'].includes(error?.code)",
     'version.stdout.trim() !== process.version',
     'if (!reusedLockedRuntime) fs.copyFileSync'
   ]) {

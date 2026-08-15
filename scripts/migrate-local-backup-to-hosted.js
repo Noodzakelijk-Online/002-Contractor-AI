@@ -14,6 +14,7 @@ const {
 } = require('../operating-ledger');
 const { createEvidenceStorage } = require('../evidence-storage');
 const { resolvePostgresConnectionOptions } = require('../postgres-sync-database');
+const { BACKUP_MANIFEST_V3, verifyBackupManifestAuthenticity } = require('../backup-manifest');
 
 const projectRoot = path.resolve(__dirname, '..');
 const MIGRATION_LOCK_ID = 2_024_070_013;
@@ -65,14 +66,19 @@ function isSqliteFile(file) {
   }
 }
 
-function verifyBackupDirectory(backupDirectory) {
+function verifyBackupDirectory(backupDirectory, options = {}) {
   const backupDir = path.resolve(backupDirectory);
   const manifestFile = path.join(backupDir, 'manifest.json');
   if (!fs.existsSync(manifestFile)) throw new Error('Backup manifest was not found.');
   const manifest = JSON.parse(fs.readFileSync(manifestFile, 'utf8'));
-  if (manifest?.format !== 'contractor-ai-backup-manifest/v2' || manifest.databaseMode !== 'sqlite' || !Array.isArray(manifest.files)) {
-    throw new Error('Hosted migration requires a SQLite contractor-ai-backup-manifest/v2 package.');
+  if (![BACKUP_MANIFEST_V3, 'contractor-ai-backup-manifest/v2'].includes(manifest?.format) || manifest.databaseMode !== 'sqlite' || !Array.isArray(manifest.files)) {
+    throw new Error('Hosted migration requires a signed SQLite contractor-ai-backup-manifest/v3 package.');
   }
+  verifyBackupManifestAuthenticity(
+    manifest,
+    options.signingKey || process.env.CONTRACTOR_AI_BACKUP_SIGNING_KEY,
+    { allowLegacyUnsigned: options.allowLegacyUnsigned === true }
+  );
   const files = [];
   const seen = new Set();
   for (const entry of manifest.files) {
@@ -482,9 +488,9 @@ function createHostedEvidenceStorageFromEnvironment() {
   });
 }
 
-async function migrateLocalBackupToHosted({ backupDir, databaseUrl, storage = null, actor = 'local_to_hosted_migration' }) {
+async function migrateLocalBackupToHosted({ backupDir, databaseUrl, storage = null, actor = 'local_to_hosted_migration', signingKey, allowLegacyUnsigned = false }) {
   if (!databaseUrl) throw new Error('A hosted PostgreSQL database URL is required.');
-  const verification = verifyBackupDirectory(backupDir);
+  const verification = verifyBackupDirectory(backupDir, { signingKey, allowLegacyUnsigned });
   const initializer = new ContractorOperatingLedger({ databaseUrl });
   const destinationMigrations = initializer.migrationStatus();
   initializer.close();
@@ -685,7 +691,9 @@ async function runCli() {
     backupDir: path.join(dataDir, 'backups', backupId),
     databaseUrl,
     storage,
-    actor: 'hosted_migration_cli'
+    actor: 'hosted_migration_cli',
+    signingKey: argumentsMap['signing-key'],
+    allowLegacyUnsigned: argumentsMap['allow-legacy-unsigned'] === true
   });
   process.stdout.write(`${JSON.stringify(result)}\n`);
 }

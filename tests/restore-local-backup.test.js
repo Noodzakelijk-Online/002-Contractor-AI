@@ -7,7 +7,10 @@ const { execFileSync, spawnSync } = require('node:child_process');
 const { DatabaseSync } = require('node:sqlite');
 const test = require('node:test');
 const { ContractorOperatingLedger } = require('../operating-ledger');
-const { verifySqliteBackupDatabase } = require('../scripts/restore-local-backup');
+const { BACKUP_MANIFEST_V3, signBackupManifest } = require('../backup-manifest');
+const { restore, verifySqliteBackupDatabase } = require('../scripts/restore-local-backup');
+
+const backupSigningKey = 'contractor-ai-restore-test-backup-signing-key-2026';
 
 function digest(file) {
   return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
@@ -916,6 +919,7 @@ test('stopped-runtime restore keeps v1 backup compatibility and creates a pre-re
     path.join(__dirname, '..', 'scripts', 'restore-local-backup.js'),
     '--data-dir', dataDir,
     '--backup-id', backupId,
+    '--allow-legacy-unsigned',
     '--confirm', `RESTORE_${backupId}`
   ], { encoding: 'utf8' });
   const result = JSON.parse(output);
@@ -982,6 +986,7 @@ test('stopped-runtime v2 restore replaces evidence only after preserving the cur
     '--data-dir', dataDir,
     '--upload-dir', uploadDir,
     '--backup-id', backupId,
+    '--allow-legacy-unsigned',
     '--confirm', `RESTORE_${backupId}`
   ], { encoding: 'utf8' });
   const result = JSON.parse(output);
@@ -1038,10 +1043,68 @@ test('stopped-runtime restore rejects manifest traversal before changing live da
     path.join(__dirname, '..', 'scripts', 'restore-local-backup.js'),
     '--data-dir', dataDir,
     '--backup-id', backupId,
+    '--allow-legacy-unsigned',
     '--confirm', `RESTORE_${backupId}`
   ], { encoding: 'utf8' });
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /unsafe file path/);
   assert.equal(fs.readFileSync(ledgerFile, 'utf8'), 'live-ledger-must-remain');
   assert.equal(fs.readFileSync(outside, 'utf8'), 'outside-file');
+});
+
+test('restore rolls back the database and evidence when the live swap fails', t => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'contractor-ai-restore-atomic-'));
+  t.after(() => fs.rmSync(dataDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }));
+  const backupId = 'atomic-restore-fixture';
+  const backupDir = path.join(dataDir, 'backups', backupId);
+  const uploadDir = path.join(dataDir, 'uploads');
+  const ledgerFile = path.join(dataDir, 'contractor-ledger.sqlite');
+  fs.mkdirSync(path.join(backupDir, 'evidence'), { recursive: true });
+  fs.mkdirSync(uploadDir, { recursive: true });
+
+  const liveJobId = createBackupLedger(ledgerFile, 'Live atomic ledger');
+  const liveEvidence = path.join(uploadDir, 'live-proof.jpg');
+  fs.writeFileSync(liveEvidence, 'live-evidence');
+  const backupLedger = path.join(backupDir, 'contractor-ledger.sqlite');
+  createBackupLedger(backupLedger, 'Backup atomic ledger');
+  const backupEvidence = path.join(backupDir, 'evidence', 'restored-proof.jpg');
+  fs.writeFileSync(backupEvidence, 'restored-evidence');
+  const files = [
+    { file: 'contractor-ledger.sqlite', target: backupLedger },
+    { file: 'evidence/restored-proof.jpg', target: backupEvidence }
+  ].map(entry => ({ file: entry.file, bytes: fs.statSync(entry.target).size, sha256: digest(entry.target) }));
+  const manifest = signBackupManifest({
+    format: BACKUP_MANIFEST_V3,
+    backupId,
+    createdAt: new Date().toISOString(),
+    databaseMode: 'sqlite',
+    database: { engine: 'sqlite', file: 'contractor-ledger.sqlite' },
+    evidence: { included: true, fileCount: 1 },
+    files
+  }, backupSigningKey);
+  fs.writeFileSync(path.join(backupDir, 'manifest.json'), JSON.stringify(manifest, null, 2));
+
+  const originalRename = fs.renameSync;
+  fs.renameSync = (source, target) => {
+    if (String(source).includes('.restore-') && path.resolve(target) === path.resolve(uploadDir)) {
+      throw new Error('simulated evidence swap failure');
+    }
+    return originalRename(source, target);
+  };
+  try {
+    assert.throws(() => restore({
+      'data-dir': dataDir,
+      'upload-dir': uploadDir,
+      'backup-id': backupId,
+      'signing-key': backupSigningKey,
+      confirm: `RESTORE_${backupId}`
+    }), /simulated evidence swap failure/);
+  } finally {
+    fs.renameSync = originalRename;
+  }
+
+  const liveDatabase = new DatabaseSync(ledgerFile, { readOnly: true });
+  assert.equal(liveDatabase.prepare('SELECT title FROM jobs WHERE id = ?').get(liveJobId).title, 'Live atomic ledger');
+  liveDatabase.close();
+  assert.equal(fs.readFileSync(liveEvidence, 'utf8'), 'live-evidence');
 });

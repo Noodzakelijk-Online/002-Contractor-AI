@@ -6,6 +6,7 @@ const root = path.resolve(__dirname, '..');
 const releaseRoot = path.join(root, 'release');
 const target = path.join(releaseRoot, 'ContractorAI-windows-x64');
 const runtimeFiles = [
+  'backup-manifest.js',
   'contractor-framework-catalog.json',
   'evidence-storage.js',
   'framework-catalog.js',
@@ -15,6 +16,7 @@ const runtimeFiles = [
   'package-lock.json',
   'postgres-sync-database.js',
   'postgres-sync-worker.js',
+  'runtime-lock.js',
   'server.js',
   'standalone-export-hai.js',
   'standalone-launcher.js',
@@ -54,13 +56,17 @@ function writeLaunchers() {
   for (const [name, contents] of Object.entries(launchers)) fs.writeFileSync(path.join(target, name), contents, 'ascii');
 }
 
+function isReusableRuntimeLockError(error, platform = process.platform) {
+  return platform === 'win32' && ['EBUSY', 'EPERM'].includes(error?.code);
+}
+
 function prepareTarget(resolvedTarget) {
   try {
     fs.rmSync(resolvedTarget, { recursive: true, force: true });
     return false;
   } catch (error) {
     const bundledNode = path.join(resolvedTarget, 'runtime', 'node.exe');
-    if (process.platform !== 'win32' || error?.code !== 'EPERM' || !fs.existsSync(bundledNode)) throw error;
+    if (!isReusableRuntimeLockError(error) || !fs.existsSync(bundledNode)) throw error;
     const version = spawnSync(bundledNode, ['--version'], { encoding: 'utf8', windowsHide: true });
     if (version.status !== 0 || version.stdout.trim() !== process.version) {
       throw new Error(`Locked packaged runtime cannot be reused; expected ${process.version}.`, { cause: error });
@@ -134,4 +140,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { assertBuildHost, buildWindowsStandalone, copyProductionDependencies, prepareTarget, runtimeFiles };
+module.exports = { assertBuildHost, buildWindowsStandalone, copyProductionDependencies, isReusableRuntimeLockError, prepareTarget, runtimeFiles };

@@ -13,6 +13,54 @@ process.env.UPLOAD_DIR = path.join(stateDirectory, 'uploads');
 
 const app = require('../server');
 
+function crc32(buffer) {
+  let crc = 0xffffffff;
+  for (const byte of buffer) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit += 1) crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1));
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function storedZip(entries) {
+  const localParts = [];
+  const centralParts = [];
+  let offset = 0;
+  for (const [filename, value] of Object.entries(entries)) {
+    const name = Buffer.from(filename);
+    const contents = Buffer.from(value);
+    const checksum = crc32(contents);
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0);
+    local.writeUInt16LE(20, 4);
+    local.writeUInt32LE(checksum, 14);
+    local.writeUInt32LE(contents.length, 18);
+    local.writeUInt32LE(contents.length, 22);
+    local.writeUInt16LE(name.length, 26);
+    localParts.push(local, name, contents);
+
+    const central = Buffer.alloc(46);
+    central.writeUInt32LE(0x02014b50, 0);
+    central.writeUInt16LE(20, 4);
+    central.writeUInt16LE(20, 6);
+    central.writeUInt32LE(checksum, 16);
+    central.writeUInt32LE(contents.length, 20);
+    central.writeUInt32LE(contents.length, 24);
+    central.writeUInt16LE(name.length, 28);
+    central.writeUInt32LE(offset, 42);
+    centralParts.push(central, name);
+    offset += local.length + name.length + contents.length;
+  }
+  const centralDirectory = Buffer.concat(centralParts);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(Object.keys(entries).length, 8);
+  end.writeUInt16LE(Object.keys(entries).length, 10);
+  end.writeUInt32LE(centralDirectory.length, 12);
+  end.writeUInt32LE(offset, 16);
+  return Buffer.concat([...localParts, centralDirectory, end]);
+}
+
 async function request(baseUrl, route, options = {}) {
   const response = await fetch(`${baseUrl}${route}`, {
     headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
@@ -321,6 +369,37 @@ test('multipart field upload stores local evidence and links ledger document', a
   const unsafeBody = await unsafeResponse.json();
   assert.equal(unsafeResponse.status, 415);
   assert.equal(unsafeBody.error.code, 'upload_signature_mismatch');
+
+  const fakeDocxForm = new FormData();
+  fakeDocxForm.append(
+    'evidenceFile',
+    new Blob([Buffer.from([0x50, 0x4b, 0x03, 0x04]), Buffer.from('not an OOXML package')], {
+      type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+    }),
+    'fake-report.docx'
+  );
+  fakeDocxForm.append('jobId', jobId);
+  const fakeDocxResponse = await fetch(`${baseUrl}/api/ledger/upload`, { method: 'POST', body: fakeDocxForm });
+  const fakeDocxBody = await fakeDocxResponse.json();
+  assert.equal(fakeDocxResponse.status, 415);
+  assert.equal(fakeDocxBody.error.code, 'invalid_docx_package');
+
+  const validDocx = storedZip({
+    '[Content_Types].xml': '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>',
+    '_rels/.rels': '<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>',
+    'word/document.xml': '<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"/>'
+  });
+  const validDocxForm = new FormData();
+  validDocxForm.append(
+    'evidenceFile',
+    new Blob([validDocx], { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' }),
+    'inspection-report.docx'
+  );
+  validDocxForm.append('jobId', jobId);
+  const validDocxResponse = await fetch(`${baseUrl}/api/ledger/upload`, { method: 'POST', body: validDocxForm });
+  const validDocxBody = await validDocxResponse.json();
+  assert.equal(validDocxResponse.status, 200, JSON.stringify(validDocxBody));
+  assert.equal(validDocxBody.uploadedFile.mimeType, 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
 
   const filesBeforeUnknownJob = fs.readdirSync(process.env.UPLOAD_DIR).length;
   const unknownJobForm = new FormData();
