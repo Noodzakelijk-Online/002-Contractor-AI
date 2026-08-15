@@ -774,6 +774,7 @@ test('hosted readiness uses the PostgreSQL ledger adapter when durable services 
     NODE_ENV: 'production',
     CONTRACTOR_AI_RUNTIME_MODE: 'hosted',
     CONTRACTOR_AI_STORAGE_MODE: 's3',
+    CONTRACTOR_AI_EVIDENCE_STORAGE_MAX_BYTES: '1073741824',
     CONTRACTOR_AI_AUTH_TOKEN: 'production-token-with-sufficient-length',
     CONTRACTOR_AI_DATABASE_URL: process.env.CONTRACTOR_AI_POSTGRES_TEST_URL,
     CONTRACTOR_AI_PUBLIC_URL: 'https://contractor-ai.test',
@@ -805,6 +806,8 @@ test('hosted readiness uses the PostgreSQL ledger adapter when durable services 
   assert.equal(readiness.body.runtime.databaseMode, 'postgres');
   assert.equal(readiness.body.runtime.evidenceStorage.status, 'verified');
   assert.equal(readiness.body.runtime.evidenceStorage.verified, true);
+  assert.equal(readiness.body.runtime.evidenceStorage.quota.explicit, true);
+  assert.equal(readiness.body.runtime.evidenceStorage.quota.maxBytes, 1073741824);
   assert.equal(readiness.body.runtime.hosting.publicHttps, true);
   assert.equal(readiness.body.runtime.hosting.publicOriginAllowed, true);
   assert.equal(readiness.body.runtime.hosting.trustedProxyConfigured, true);
@@ -874,6 +877,7 @@ test('hosted readiness fails closed when object storage rejects the verification
     NODE_ENV: 'production',
     CONTRACTOR_AI_RUNTIME_MODE: 'hosted',
     CONTRACTOR_AI_STORAGE_MODE: 's3',
+    CONTRACTOR_AI_EVIDENCE_STORAGE_MAX_BYTES: '1073741824',
     CONTRACTOR_AI_AUTH_TOKEN: 'production-token-with-sufficient-length',
     CONTRACTOR_AI_DATABASE_URL: process.env.CONTRACTOR_AI_POSTGRES_TEST_URL,
     CONTRACTOR_AI_PUBLIC_URL: 'https://contractor-ai.test',

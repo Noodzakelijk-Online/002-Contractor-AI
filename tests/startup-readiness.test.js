@@ -218,6 +218,7 @@ test('direct hosted startup refuses insecure and unreachable object storage', { 
       NODE_ENV: 'production',
       CONTRACTOR_AI_RUNTIME_MODE: 'hosted',
       CONTRACTOR_AI_STORAGE_MODE: 's3',
+      CONTRACTOR_AI_EVIDENCE_STORAGE_MAX_BYTES: '1073741824',
       CONTRACTOR_AI_AUTH_TOKEN: 'hosted-startup-test-owner-token',
       CONTRACTOR_AI_ROLE_TOKENS: '',
       CONTRACTOR_AI_DATABASE_URL: process.env.CONTRACTOR_AI_POSTGRES_TEST_URL,
