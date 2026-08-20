@@ -360,7 +360,7 @@ test('direct hosted startup refuses missing HTTPS, EU, DPA, and recovery declara
   assert.match(result.stderr, /hosted_trusted_proxy_required/);
 });
 
-test('direct hosted startup refuses insecure and unreachable object storage', { skip: !process.env.CONTRACTOR_AI_POSTGRES_TEST_URL }, t => {
+test('direct hosted startup refuses insecure object storage before opening external adapters', { skip: !process.env.CONTRACTOR_AI_POSTGRES_TEST_URL }, t => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'contractor-ai-startup-storage-'));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const result = childProcess.spawnSync(process.execPath, ['server.js'], {
@@ -373,8 +373,9 @@ test('direct hosted startup refuses insecure and unreachable object storage', { 
       CONTRACTOR_AI_RUNTIME_MODE: 'hosted',
       CONTRACTOR_AI_STORAGE_MODE: 's3',
       CONTRACTOR_AI_EVIDENCE_STORAGE_MAX_BYTES: '1073741824',
-      CONTRACTOR_AI_AUTH_TOKEN: 'hosted-startup-test-owner-token',
+      CONTRACTOR_AI_AUTH_TOKEN: 'hosted-startup-test-owner-token-at-least-32',
       CONTRACTOR_AI_ROLE_TOKENS: '',
+      CONTRACTOR_AI_BACKUP_SIGNING_KEY: 'hosted-startup-test-backup-signing-key-2026',
       CONTRACTOR_AI_DATABASE_URL: process.env.CONTRACTOR_AI_POSTGRES_TEST_URL,
       CONTRACTOR_AI_PUBLIC_URL: 'https://contractor-ai.test',
       CONTRACTOR_AI_HOSTING_PROVIDER: 'EU Test Provider',
@@ -404,5 +405,6 @@ test('direct hosted startup refuses insecure and unreachable object storage', { 
   assert.equal(result.status, 1);
   assert.match(result.stderr, /production_runtime_not_ready/);
   assert.match(result.stderr, /hosted_object_storage_tls_required/);
-  assert.match(result.stderr, /object_storage_unavailable/);
+  assert.match(result.stderr, /external_adapter_initialization_blocked/);
+  assert.doesNotMatch(result.stderr, /object_storage_unavailable/);
 });
