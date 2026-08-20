@@ -61,7 +61,9 @@ test('client feedback stays scoped, creates internal recovery, and appears in th
 
   await page.reload();
   await expect(page.getByTestId('client-feedback-panel').getByText('Feedback ontvangen')).toBeVisible();
-  const publicSnapshotResponse = await request.get(`/api/client-portal/${access.access.portalToken}`);
+  const publicSnapshotResponse = await request.get('/api/client-portal', {
+    headers: { Authorization: `Bearer ${access.access.portalToken}` }
+  });
   expect(publicSnapshotResponse.ok()).toBeTruthy();
   const publicSnapshot = await publicSnapshotResponse.json();
   expect(publicSnapshot.portal.feedback).toEqual(expect.objectContaining({

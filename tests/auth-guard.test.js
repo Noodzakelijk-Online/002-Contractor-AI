@@ -1,6 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const http = require('node:http');
 const os = require('node:os');
 const path = require('node:path');
 
@@ -65,6 +66,25 @@ async function request(baseUrl, route, options = {}) {
   return { response, body };
 }
 
+function rawRequest(baseUrl, route, options = {}) {
+  return new Promise((resolve, reject) => {
+    const target = new URL(route, baseUrl);
+    const request = http.request(target, options, response => {
+      const chunks = [];
+      response.on('data', chunk => chunks.push(chunk));
+      response.on('end', () => {
+        try {
+          resolve({ response, body: JSON.parse(Buffer.concat(chunks).toString('utf8')) });
+        } catch (error) {
+          reject(error);
+        }
+      });
+    });
+    request.once('error', reject);
+    request.end();
+  });
+}
+
 test('production auth guard fails closed when auth is required without a strong token', async () => {
   const app = loadServerWithEnv({ NODE_ENV: 'production' });
 
@@ -99,6 +119,15 @@ test('local mode assigns a trusted audit actor and does not retain a submitted a
     });
     assert.equal(foreignOrigin.response.status, 403);
     assert.equal(foreignOrigin.body.error.code, 'local_origin_forbidden');
+
+    const reboundRead = await rawRequest(baseUrl, '/api/operations/export', {
+      headers: {
+        Host: 'attacker.invalid',
+        Origin: 'http://attacker.invalid'
+      }
+    });
+    assert.equal(reboundRead.response.statusCode, 403);
+    assert.equal(reboundRead.body.error.code, 'local_host_forbidden');
 
     const intake = await request(baseUrl, '/api/ledger/intake', {
       method: 'POST',
@@ -384,14 +413,15 @@ test('approved client portal tokens work without exposing the authenticated dash
     const deniedDashboard = await request(baseUrl, '/api/ledger/dashboard');
     assert.equal(deniedDashboard.response.status, 401);
 
-    const portal = await request(baseUrl, `/api/client-portal/${access.body.access.portalToken}`);
+    const portalAuthorization = { Authorization: `Bearer ${access.body.access.portalToken}` };
+    const portal = await request(baseUrl, '/api/client-portal', { headers: portalAuthorization });
     assert.equal(portal.response.status, 200);
     assert.equal(portal.body.job.title, 'Authenticated portal job');
     assert.match(portal.response.headers.get('cache-control') || '', /\bno-store\b/);
 
-    const portalPreference = await request(baseUrl, `/api/client-portal/${access.body.access.portalToken}/preferences`, {
+    const portalPreference = await request(baseUrl, '/api/client-portal/preferences', {
       method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { ...portalAuthorization, 'Content-Type': 'application/json' },
       body: JSON.stringify({ locale: 'nl-NL' })
     });
     assert.equal(portalPreference.response.status, 200);
@@ -399,10 +429,10 @@ test('approved client portal tokens work without exposing the authenticated dash
 
     const portalResponse = await request(
       baseUrl,
-      `/api/client-portal/${access.body.access.portalToken}/selections/${selection.body.clientSelection.id}/responses`,
+      `/api/client-portal/selections/${selection.body.clientSelection.id}/responses`,
       {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { ...portalAuthorization, 'Content-Type': 'application/json' },
         body: JSON.stringify({
           responseId: 'auth-portal-response-0001',
           decision: 'accepted',
@@ -420,10 +450,10 @@ test('approved client portal tokens work without exposing the authenticated dash
 
     const invalidPortalResponse = await request(
       baseUrl,
-      `/api/client-portal/not-a-real-token/selections/${selection.body.clientSelection.id}/responses`,
+      `/api/client-portal/selections/${selection.body.clientSelection.id}/responses`,
       {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { Authorization: 'Bearer invalid-portal-token-at-least-32-characters', 'Content-Type': 'application/json' },
         body: JSON.stringify({
           responseId: 'auth-invalid-portal-response-0001',
           decision: 'accepted',

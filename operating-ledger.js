@@ -51719,7 +51719,10 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
       },
       metadata: { portalAccessId: snapshot.portal.accessId, externalCommitments: 0 }
     });
-    return issuePackage;
+    return {
+      ...issuePackage,
+      filename: `${portalVariation.variationNumber}-R${portalVariation.revisionNumber}-${issuePackage.filename}`
+    };
   }
 
   submitClientPortalChangeOrderResponse(portalToken, changeOrderId, payload = {}, options = {}) {

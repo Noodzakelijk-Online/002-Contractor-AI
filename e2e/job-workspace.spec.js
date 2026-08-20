@@ -270,7 +270,9 @@ test('office operator can review job planning and create a client draft without 
   await expect(page.getByText(/Client portal access is pending approval/i)).toBeVisible();
   const oneTimePortalLink = await workspace.getByLabel('One-time client portal link').inputValue();
   const portalToken = new URL(oneTimePortalLink).hash.slice('#token='.length);
-  const inactivePortalResponse = await request.get(`/api/client-portal/${portalToken}`);
+  const inactivePortalResponse = await request.get('/api/client-portal', {
+    headers: { Authorization: `Bearer ${portalToken}` }
+  });
   expect(inactivePortalResponse.status()).toBe(404);
 
   const communicationsResponse = await request.get('/api/ledger/communications?status=all&limit=100');
@@ -2861,7 +2863,9 @@ test('owner archives and restores a retained job through exact approval decision
     }
   });
   expect(portalApprovalResponse.ok()).toBeTruthy();
-  const activePortalResponse = await request.get(`/api/client-portal/${portalAccess.access.portalToken}`);
+  const activePortalResponse = await request.get('/api/client-portal', {
+    headers: { Authorization: `Bearer ${portalAccess.access.portalToken}` }
+  });
   expect(activePortalResponse.ok()).toBeTruthy();
   const retainedResponse = await request.get(`/api/ledger/jobs/${intake.job.id}`);
   const retained = await retainedResponse.json();
@@ -2901,7 +2905,9 @@ test('owner archives and restores a retained job through exact approval decision
   expect(archived.job.data.archive).toMatchObject({ active: true, previousStatus: retainedStatus, previousPhase: retainedPhase });
   expect(archived.job.data.archive.revokedPortalAccessIds).toEqual([portalAccess.access.id]);
   expect(archived.job.portalAccess.find(access => access.id === portalAccess.access.id)?.status).toBe('revoked');
-  const closedPortalResponse = await request.get(`/api/client-portal/${portalAccess.access.portalToken}`);
+  const closedPortalResponse = await request.get('/api/client-portal', {
+    headers: { Authorization: `Bearer ${portalAccess.access.portalToken}` }
+  });
   expect(closedPortalResponse.status()).toBe(404);
 
   await page.getByRole('button', { name: 'Operations', exact: true }).click();
@@ -3219,9 +3225,9 @@ test('client portal accepts a numbered formal variation only after internal veri
   });
   expect(portalApproval.ok()).toBeTruthy();
 
-  const packageResponse = await request.get(
-    `/api/client-portal/${access.access.portalToken}/change-orders/${variation.id}/package`
-  );
+  const packageResponse = await request.get(`/api/client-portal/change-orders/${variation.id}/package`, {
+    headers: { Authorization: `Bearer ${access.access.portalToken}` }
+  });
   expect(packageResponse.ok()).toBeTruthy();
   expect(packageResponse.headers()['content-type']).toMatch(/^text\/html/);
   expect(await packageResponse.text()).toContain(variation.variationNumber);
@@ -3232,10 +3238,10 @@ test('client portal accepts a numbered formal variation only after internal veri
   const variationCard = page.locator('.client-portal-variation').filter({ hasText: variation.variationNumber });
   await expect(variationCard).toHaveCount(1);
   await expect(variationCard.getByRole('heading', { name: `${variation.variationNumber} / R1 - Revised occupied access protection` })).toBeVisible();
-  await expect(variationCard.getByRole('link', { name: 'Download genummerd voorstel' })).toHaveAttribute(
-    'href',
-    `/api/client-portal/${access.access.portalToken}/change-orders/${variation.id}/package`
-  );
+  const downloadPromise = page.waitForEvent('download');
+  await variationCard.getByRole('button', { name: 'Download genummerd voorstel' }).click();
+  const packageDownload = await downloadPromise;
+  expect(packageDownload.suggestedFilename()).toContain(variation.variationNumber);
   await variationCard.getByLabel('Ik ga akkoord').check();
   await variationCard.getByLabel('Naam bevoegde ondertekenaar').fill('Authorized Browser Client');
   await variationCard.getByLabel('Ik ben bevoegd om dit voorstel namens de opdrachtgever te accepteren.').check();

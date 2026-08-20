@@ -101,7 +101,8 @@ test('client feedback API enforces roles, supports scoped portal capture, and ex
   });
   assert.equal(approved.response.status, 200);
 
-  const portalBefore = await request(baseUrl, `/api/client-portal/${access.body.access.portalToken}`, null);
+  const portalToken = access.body.access.portalToken;
+  const portalBefore = await request(baseUrl, '/api/client-portal', portalToken);
   assert.equal(portalBefore.response.status, 200);
   assert.equal(portalBefore.body.portal.feedback.submitted, false);
   const portalPayload = {
@@ -117,7 +118,7 @@ test('client feedback API enforces roles, supports scoped portal capture, and ex
     followUpConsent: true,
     testimonialConsent: false
   };
-  const portalFeedback = await request(baseUrl, `/api/client-portal/${access.body.access.portalToken}/feedback`, null, {
+  const portalFeedback = await request(baseUrl, '/api/client-portal/feedback', portalToken, {
     method: 'POST',
     body: JSON.stringify(portalPayload)
   });
@@ -130,14 +131,14 @@ test('client feedback API enforces roles, supports scoped portal capture, and ex
   assert.equal(portalFeedback.body.reviewRequested, false);
   assert.equal(portalFeedback.body.referralRequested, false);
   assert.equal(portalFeedback.body.externalCommitments, 0);
-  const portalReplay = await request(baseUrl, `/api/client-portal/${access.body.access.portalToken}/feedback`, null, {
+  const portalReplay = await request(baseUrl, '/api/client-portal/feedback', portalToken, {
     method: 'POST',
     body: JSON.stringify(portalPayload)
   });
   assert.equal(portalReplay.response.status, 201);
   assert.equal(portalReplay.body.replayed, true);
 
-  const portalAfter = await request(baseUrl, `/api/client-portal/${access.body.access.portalToken}`, null);
+  const portalAfter = await request(baseUrl, '/api/client-portal', portalToken);
   assert.equal(portalAfter.body.portal.feedback.submitted, true);
   const exported = await request(baseUrl, '/api/operations/export', tokens.owner);
   assert.equal(exported.response.status, 200);

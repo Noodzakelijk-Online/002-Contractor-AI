@@ -10,7 +10,8 @@ services:
       NODE_ENV: ${NODE_ENV:-development}
       CONTRACTOR_AI_RUNTIME_MODE: ${CONTRACTOR_AI_RUNTIME_MODE:-local}
       CONTRACTOR_AI_STORAGE_MODE: ${CONTRACTOR_AI_STORAGE_MODE:-local}
-      CONTRACTOR_AI_REQUIRE_AUTH: ${CONTRACTOR_AI_REQUIRE_AUTH:-false}
+      CONTRACTOR_AI_REQUIRE_AUTH: "true"
+      CONTRACTOR_AI_AUTH_TOKEN: ${CONTRACTOR_AI_AUTH_TOKEN:?Set a strong owner key with at least 32 characters in .env}
       CONTRACTOR_AI_BIND_HOST: 0.0.0.0
     volumes:
       - contractor-ai-data:/var/lib/contractor-ai

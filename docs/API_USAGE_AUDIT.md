@@ -13,7 +13,7 @@ mapping, browser flows, and the release-contract scan.
 | --- | --- | --- |
 | `/api/auth/*`, `/api/session`, `/api/preferences` | Browser sessions and self-scoped locale preference | public login; authenticated session actions |
 | `/api/ledger/*` | Canonical operational and business records | role and resource scoped |
-| `/api/client-portal/:token/*` | Narrow client evidence and responses | scoped opaque portal token |
+| `/api/client-portal/*` | Narrow client evidence and responses | scoped opaque portal token in the `Authorization` header |
 | `/api/operations/*` | backup, export, identity, audit, safety, diagnostics | owner/approver according to route |
 | `/api/health/ready` | Minimal liveness/readiness probe | public, deliberately low detail |
 | `/api/readiness` | Detailed runtime and provider readiness | authenticated |

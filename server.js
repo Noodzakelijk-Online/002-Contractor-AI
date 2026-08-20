@@ -101,7 +101,7 @@ const releaseSha = String(process.env.CONTRACTOR_AI_RELEASE_SHA || '').trim();
 const hostedDatabaseSslMode = (() => {
   if (!hostedDatabaseUrl) return '';
   try {
-    return String(new URL(hostedDatabaseUrl).searchParams.get('sslmode') || 'verify-full').trim().toLowerCase();
+    return String(new URL(hostedDatabaseUrl).searchParams.get('sslmode') || '').trim().toLowerCase();
   } catch {
     return 'invalid';
   }
@@ -207,6 +207,47 @@ function boundedInteger(value, fallback, minimum, maximum) {
   return Math.min(maximum, Math.max(minimum, Math.floor(parsed)));
 }
 
+function isLoopbackHostname(value) {
+  const normalized = String(value || '').trim().toLowerCase().replace(/^\[|\]$/g, '');
+  if (normalized === 'localhost' || normalized === '::1') return true;
+  const octets = normalized.split('.');
+  return octets.length === 4
+    && octets[0] === '127'
+    && octets.every(octet => /^\d{1,3}$/.test(octet) && Number(octet) <= 255);
+}
+
+function requestHostname(req) {
+  const host = String(req.headers.host || '').trim();
+  if (!host) return '';
+  try {
+    return new URL(`http://${host}`).hostname.replace(/^\[|\]$/g, '');
+  } catch {
+    return '';
+  }
+}
+
+function hostedExternalInitializationProblems() {
+  if (runtimeMode !== 'hosted') return [];
+  const problems = [];
+  if (!hostedDatabaseUrl) {
+    problems.push('durable_database_required');
+  } else if (hostedDatabaseSslMode !== 'verify-full') {
+    problems.push('hosted_postgres_tls_required');
+  }
+  if (storageMode !== 's3') {
+    problems.push('durable_object_storage_required');
+  } else if (evidenceStorageEndpointProtocol !== 'https:') {
+    problems.push('hosted_object_storage_tls_required');
+  }
+  if (evidenceStorageInitError) {
+    problems.push(evidenceStorageInitError.code || 'storage_initialization_failed');
+  }
+  return [...new Set(problems)];
+}
+
+const externalInitializationProblems = hostedExternalInitializationProblems();
+const externalAdaptersQuarantined = runtimeMode === 'hosted' && externalInitializationProblems.length > 0;
+
 function configureHttpServer(server) {
   if (!server) return server;
   server.keepAliveTimeout = httpKeepAliveTimeoutMs;
@@ -277,6 +318,9 @@ function runtimeConfiguration(options = {}) {
   }
   if (hosted && !dashboardAuthRequired) {
     issues.push({ code: 'hosted_auth_required', message: 'Hosted mode requires dashboard/API authentication.' });
+  }
+  if (!dashboardAuthRequired && !isLoopbackHostname(configuredBindHost)) {
+    issues.push({ code: 'credential_free_loopback_required', message: 'Credential-free local mode must bind to an explicit loopback address.' });
   }
   if (roleTokenConfig.issues.length) {
     issues.push(...roleTokenConfig.issues);
@@ -958,6 +1002,17 @@ function log(level, message, meta = {}) {
 }
 
 async function verifyEvidenceStorage({ force = false } = {}) {
+  if (externalAdaptersQuarantined) {
+    evidenceStorageVerificationCache = {
+      ready: false,
+      status: 'blocked',
+      mode: storageMode,
+      checkedAt: new Date().toISOString(),
+      code: 'external_adapter_initialization_blocked',
+      problems: externalInitializationProblems
+    };
+    return evidenceStorageVerificationCache;
+  }
   const cachedAt = Date.parse(evidenceStorageVerificationCache?.checkedAt || '');
   const cacheFresh = Number.isFinite(cachedAt) && Date.now() - cachedAt < evidenceStorageVerificationTtlMs;
   if (!force && evidenceStorageVerificationCache && cacheFresh) {
@@ -1015,12 +1070,39 @@ async function verifyEvidenceStorage({ force = false } = {}) {
 }
 
 function logSafeRequestPath(req) {
-  return String(req.originalUrl || req.path || '')
-    .replace(/(\/api\/client-portal\/)[^/?#]+/g, '$1[redacted]');
+  const path = String(req.originalUrl || req.path || '');
+  if (/^\/api\/client-portal(?:[?#]|$|\/(?:messages|feedback|preferences|selections\/|change-orders\/))/.test(path)) {
+    return path;
+  }
+  return path.replace(/(\/api\/client-portal\/)[^/?#]+/g, '$1[redacted]');
 }
 
 function isClientPortalApiPath(pathname) {
-  return /^\/api\/client-portal\/[^/]+(?:\/messages|\/feedback|\/preferences|\/selections\/[^/]+\/responses|\/change-orders\/[^/]+(?:\/responses|\/package))?$/.test(String(pathname || ''));
+  const path = String(pathname || '');
+  const canonical = /^\/api\/client-portal(?:\/messages|\/feedback|\/preferences|\/selections\/[^/]+\/responses|\/change-orders\/[^/]+(?:\/responses|\/package))?$/;
+  const retiredPathToken = /^\/api\/client-portal\/[^/]+(?:\/messages|\/feedback|\/preferences|\/selections\/[^/]+\/responses|\/change-orders\/[^/]+(?:\/responses|\/package))?$/;
+  return canonical.test(path) || retiredPathToken.test(path);
+}
+
+function extractClientPortalToken(req) {
+  const explicitHeader = req.headers['x-client-portal-token'];
+  if (Array.isArray(explicitHeader)) return String(explicitHeader[0] || '').trim();
+  if (explicitHeader) return String(explicitHeader).trim();
+  const bearer = String(req.headers.authorization || '').match(/^Bearer\s+(.+)$/i);
+  return bearer ? bearer[1].trim() : '';
+}
+
+function requireClientPortalToken(req, res, next) {
+  const token = extractClientPortalToken(req);
+  if (token.length < 32 || token.length > 512) {
+    return sendError(req, res, 401, 'client_portal_token_required', 'A valid client portal access token is required.');
+  }
+  Object.defineProperty(req, 'clientPortalToken', {
+    value: token,
+    enumerable: false,
+    configurable: true
+  });
+  return next();
 }
 
 function sendError(req, res, statusCode, code, message, details) {
@@ -1371,6 +1453,17 @@ function bindTrustedRequestActor(req) {
     enumerable: false,
     configurable: true
   });
+}
+
+function requireCredentialFreeLoopbackHost(req, res, next) {
+  if (dashboardAuthRequired || isLoopbackHostname(requestHostname(req))) return next();
+  return sendError(
+    req,
+    res,
+    403,
+    'local_host_forbidden',
+    'Credential-free local access requires a loopback request host.'
+  );
 }
 
 function requireDashboardAuth(req, res, next) {
@@ -2133,10 +2226,49 @@ function requireSessionMutationOrigin(req, res, next) {
   return next();
 }
 
+function requestOrigin(req) {
+  const host = String(req.get('host') || '').trim();
+  if (!host) return '';
+  try {
+    return new URL(`${req.protocol}://${host}`).origin;
+  } catch {
+    return '';
+  }
+}
+
+function authenticationOriginAllowed(req) {
+  const fetchSite = String(req.headers['sec-fetch-site'] || '').trim().toLowerCase();
+  if (fetchSite === 'cross-site') return false;
+  const origin = String(req.headers.origin || '').trim();
+  if (!origin) return true;
+  if (allowedOrigins.includes(origin)) return true;
+  if (runtimeMode === 'hosted') return false;
+  try {
+    return isLoopbackHostname(new URL(origin).hostname) && origin === requestOrigin(req);
+  } catch {
+    return false;
+  }
+}
+
+function requireAuthenticationRequestIntegrity(req, res, next) {
+  if (req.path !== '/api/auth/login' && req.path !== '/api/auth/logout') return next();
+  if (!authenticationOriginAllowed(req)) {
+    return sendError(req, res, 403, 'authentication_origin_forbidden', 'Authentication changes require a trusted same-origin request.');
+  }
+  if (req.path === '/api/auth/login' && !req.is('application/json')) {
+    return sendError(req, res, 415, 'authentication_json_required', 'Operator sign-in requires an application/json request.');
+  }
+  if (req.path === '/api/auth/logout' && req.operator?.authMethod !== 'session') {
+    return sendError(req, res, 401, 'session_authentication_required', 'An authenticated operator session is required to sign out.');
+  }
+  return next();
+}
+
 // Middleware
 app.disable('x-powered-by');
 app.use(setSecurityHeaders);
 app.use(attachRequestContext);
+app.use(requireCredentialFreeLoopbackHost);
 app.use(compression({
   threshold: 1_024,
   filter: (req, res) => req.headers['x-no-compression'] !== 'true' && compression.filter(req, res)
@@ -2167,6 +2299,7 @@ app.use((req, res, next) => {
   if (runtimeConfiguration().ready) return next();
   return sendError(req, res, 503, 'runtime_not_ready', 'Contractor.AI is locked until its runtime requirements are valid.');
 });
+app.use(requireAuthenticationRequestIntegrity);
 app.use(requireSessionMutationOrigin);
 app.use(requireOperatorAuthorization);
 const standardJsonParser = express.json({ limit: '2mb' });
@@ -2565,9 +2698,9 @@ let operatingLedger;
 try {
   runtimeProcessLock = runtimeProcessLockRequired ? acquireRuntimeLock(dataDir, { purpose: 'runtime' }) : null;
   operatingLedger = new ContractorOperatingLedger({
-    dbFile: ledgerFile,
-    databaseUrl: hostedDatabaseUrl || null,
-    stateProvider: () => legacyStateForMigration,
+    dbFile: externalAdaptersQuarantined ? ':memory:' : ledgerFile,
+    databaseUrl: externalAdaptersQuarantined ? null : (hostedDatabaseUrl || null),
+    stateProvider: () => externalAdaptersQuarantined ? { jobs: [], workers: [], tools: [] } : legacyStateForMigration,
     logger: log
   });
 } catch (error) {
@@ -2887,7 +3020,7 @@ app.get('/api/ledger/documents/:id/content', async (req, res) => {
       entityId: document.id,
       jobId: document.jobId,
       action: 'download_document',
-      actor: req.operator?.role || 'authenticated_operator',
+      actor: trustedRequestActor(req),
       after: { storageRef: document.storageRef, filename: document.filename }
     });
     res.setHeader('Content-Type', document.mimeType || 'application/octet-stream');
@@ -5283,23 +5416,23 @@ app.post('/api/ledger/jobs/:id/client-feedback', (req, res) => {
   }), 201);
 });
 
-app.get('/api/client-portal/:token', (req, res) => {
+app.get('/api/client-portal', requireClientPortalToken, (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    ...operatingLedger.getClientPortalSnapshot(req.params.token)
+    ...operatingLedger.getClientPortalSnapshot(req.clientPortalToken)
   }));
 });
 
-app.patch('/api/client-portal/:token/preferences', (req, res) => {
+app.patch('/api/client-portal/preferences', requireClientPortalToken, (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    preferences: operatingLedger.updateClientPortalPreferences(req.params.token, req.body || {}, { actor: 'client_portal' })
+    preferences: operatingLedger.updateClientPortalPreferences(req.clientPortalToken, req.body || {}, { actor: 'client_portal' })
   }));
 });
 
-app.post('/api/client-portal/:token/messages', (req, res) => {
+app.post('/api/client-portal/messages', requireClientPortalToken, (req, res) => {
   return handleLedgerRequest(req, res, () => {
-    const result = operatingLedger.addClientPortalMessage(req.params.token, req.body || {});
+    const result = operatingLedger.addClientPortalMessage(req.clientPortalToken, req.body || {});
     return {
       success: true,
       deliveryMode: 'record_only',
@@ -5310,10 +5443,10 @@ app.post('/api/client-portal/:token/messages', (req, res) => {
   }, 201);
 });
 
-app.post('/api/client-portal/:token/selections/:selectionId/responses', (req, res) => {
+app.post('/api/client-portal/selections/:selectionId/responses', requireClientPortalToken, (req, res) => {
   return handleLedgerRequest(req, res, () => {
     const result = operatingLedger.submitClientPortalSelectionResponse(
-      req.params.token,
+      req.clientPortalToken,
       req.params.selectionId,
       req.body || {},
       { actor: 'client_portal' }
@@ -5327,20 +5460,20 @@ app.post('/api/client-portal/:token/selections/:selectionId/responses', (req, re
   }, 201);
 });
 
-app.post('/api/client-portal/:token/feedback', (req, res) => {
+app.post('/api/client-portal/feedback', requireClientPortalToken, (req, res) => {
   return handleLedgerRequest(req, res, () => ({
     success: true,
-    ...operatingLedger.submitClientPortalFeedback(req.params.token, req.body || {}, { actor: 'client_portal' }),
+    ...operatingLedger.submitClientPortalFeedback(req.clientPortalToken, req.body || {}, { actor: 'client_portal' }),
     reviewRequested: false,
     referralRequested: false,
     externalCommitments: 0
   }), 201);
 });
 
-app.get('/api/client-portal/:token/change-orders/:changeOrderId/package', (req, res) => {
+app.get('/api/client-portal/change-orders/:changeOrderId/package', requireClientPortalToken, (req, res) => {
   try {
     const issuePackage = operatingLedger.getClientPortalChangeOrderIssuePackage(
-      req.params.token,
+      req.clientPortalToken,
       req.params.changeOrderId,
       { actor: 'client_portal' }
     );
@@ -5362,10 +5495,10 @@ app.get('/api/client-portal/:token/change-orders/:changeOrderId/package', (req, 
   }
 });
 
-app.post('/api/client-portal/:token/change-orders/:changeOrderId/responses', (req, res) => {
+app.post('/api/client-portal/change-orders/:changeOrderId/responses', requireClientPortalToken, (req, res) => {
   return handleLedgerRequest(req, res, () => {
     const result = operatingLedger.submitClientPortalChangeOrderResponse(
-      req.params.token,
+      req.clientPortalToken,
       req.params.changeOrderId,
       req.body || {},
       { actor: 'client_portal' }
@@ -5378,6 +5511,28 @@ app.post('/api/client-portal/:token/change-orders/:changeOrderId/responses', (re
     };
   }, 201);
 });
+
+function retiredClientPortalPathTokenRoute(req, res) {
+  return res.status(410).json({
+    error: {
+      code: 'client_portal_path_token_retired',
+      message: 'Client portal tokens are no longer accepted in request paths. Send the token as a Bearer authorization header.',
+      requestId: req.requestId
+    },
+    migration: {
+      endpoint: req.path.replace(/^\/api\/client-portal\/[^/]+/, '/api/client-portal'),
+      authorization: 'Bearer <client-portal-token>'
+    }
+  });
+}
+
+app.get('/api/client-portal/:token', retiredClientPortalPathTokenRoute);
+app.patch('/api/client-portal/:token/preferences', retiredClientPortalPathTokenRoute);
+app.post('/api/client-portal/:token/messages', retiredClientPortalPathTokenRoute);
+app.post('/api/client-portal/:token/selections/:selectionId/responses', retiredClientPortalPathTokenRoute);
+app.post('/api/client-portal/:token/feedback', retiredClientPortalPathTokenRoute);
+app.get('/api/client-portal/:token/change-orders/:changeOrderId/package', retiredClientPortalPathTokenRoute);
+app.post('/api/client-portal/:token/change-orders/:changeOrderId/responses', retiredClientPortalPathTokenRoute);
 
 app.post('/api/ledger/jobs/:id/documents', (req, res) => {
   return handleLedgerRequest(req, res, () => ({
@@ -9491,6 +9646,15 @@ app.use((error, req, res, next) => {
 });
 
 async function startDirectServer(options = {}) {
+  const listenPort = options.port ?? port;
+  const listenHost = String(options.host ?? configuredBindHost).trim() || undefined;
+  if (!dashboardAuthRequired && !isLoopbackHostname(listenHost)) {
+    log('error', 'credential_free_loopback_required', { host: listenHost || 'system_default' });
+    await shutdownRuntime({ signal: 'credential_free_non_loopback' });
+    const error = new Error('Credential-free local mode requires an explicit loopback listener.');
+    error.code = 'credential_free_loopback_required';
+    throw error;
+  }
   const storageVerification = await verifyEvidenceStorage({ force: true });
   const startupRuntime = runtimeConfiguration({ storageVerification });
   if ((isProduction || runtimeMode === 'hosted') && !startupRuntime.ready) {
@@ -9501,8 +9665,6 @@ async function startDirectServer(options = {}) {
     throw error;
   }
   if (directServer?.listening) return directServer;
-  const listenPort = options.port ?? port;
-  const listenHost = String(options.host ?? configuredBindHost).trim() || undefined;
   directServer = configureHttpServer(app.listen({ port: listenPort, ...(listenHost ? { host: listenHost } : {}) }));
   await new Promise((resolve, reject) => {
     const onError = error => {

@@ -5,6 +5,14 @@ Versioning for the application contract; database migrations remain append-only.
 
 ## Unreleased
 
+- Hardened local and hosted trust boundaries: credential-free mode now requires
+  loopback request hosts and listeners, hosted PostgreSQL requires explicit
+  `sslmode=verify-full`, and invalid database or object-storage settings are
+  rejected before external adapters can open a connection.
+- Protected operator sessions against login/logout CSRF with trusted-origin,
+  JSON-only login, and authenticated-session logout checks. Client portal
+  capabilities now travel in authorization headers; token-in-path routes return
+  an explicit `410` migration response.
 - All API responses now default to `Cache-Control: no-store`, including early
   authentication failures and token-scoped client portal data. Explicitly
   non-sensitive catalog routes can still opt into a bounded private cache.

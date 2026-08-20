@@ -24,7 +24,11 @@ Rotate the role key to invalidate its sessions after suspected disclosure.
 
 ## Application controls
 
-- Explicit CORS allowlist and same-origin checks for cookie-authenticated writes.
+- Explicit CORS allowlist, trusted-origin checks for login/logout, JSON-only login,
+  and same-origin checks for cookie-authenticated writes.
+- Credential-free operation rejects non-loopback listeners and foreign request
+  hosts. Client portal capabilities travel only in authorization headers; retired
+  token-in-path routes cannot use the supplied capability.
 - Strict hosted proxy allowlist; boolean, wildcard, universal CIDR, and numeric-hop
   trust settings fail startup.
 - Persisted, bounded, HMAC-bucketed API and login rate limits that do not retain the
@@ -99,7 +103,8 @@ Hosted startup fails unless all of the following are declared and testable:
 - production authentication and bounded session/login/API policies;
 - EU provider, region, `CONTRACTOR_AI_DATA_RESIDENCY=EU`, retained DPA reference,
   and retained retention-policy reference;
-- TLS PostgreSQL with managed snapshot/PITR recovery declaration;
+- certificate- and hostname-verifying PostgreSQL (`sslmode=verify-full`) with a
+  managed snapshot/PITR recovery declaration;
 - private HTTPS S3-compatible EU storage, scoped prefix, successful write/read/delete
   probe, versioning declaration, and retained backup-policy reference.
 

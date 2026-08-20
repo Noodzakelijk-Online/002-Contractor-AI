@@ -60,6 +60,23 @@ test('browser operator session preserves role authorization without storing the 
   const app = loadServerWithAuth({ roleTokens });
 
   await withServer(app, async baseUrl => {
+    const crossSiteLogin = await request(baseUrl, '/api/auth/login', {
+      method: 'POST',
+      headers: { Origin: 'https://attacker.invalid', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: roleTokens.office_operator })
+    });
+    assert.equal(crossSiteLogin.response.status, 403);
+    assert.equal(crossSiteLogin.body.error.code, 'authentication_origin_forbidden');
+    assert.equal(crossSiteLogin.response.headers.get('set-cookie'), null);
+
+    const formLogin = await request(baseUrl, '/api/auth/login', {
+      method: 'POST',
+      headers: { Origin: baseUrl, 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: `token=${encodeURIComponent(roleTokens.office_operator)}`
+    });
+    assert.equal(formLogin.response.status, 415);
+    assert.equal(formLogin.body.error.code, 'authentication_json_required');
+
     const sessionBeforeLogin = await request(baseUrl, '/api/session');
     assert.equal(sessionBeforeLogin.response.status, 200);
     assert.deepEqual(sessionBeforeLogin.body.authentication, {
@@ -175,6 +192,17 @@ test('browser operator session preserves role authorization without storing the 
     const tamperedRequest = await request(baseUrl, '/api/ledger/jobs', { headers: { Cookie: tamperedCookie } });
     assert.equal(tamperedRequest.response.status, 401);
 
+    const crossSiteLogout = await request(baseUrl, '/api/auth/logout', {
+      method: 'POST',
+      headers: { Cookie: issued.cookie, Origin: 'https://attacker.invalid' }
+    });
+    assert.equal(crossSiteLogout.response.status, 403);
+    assert.equal(crossSiteLogout.body.error.code, 'authentication_origin_forbidden');
+    assert.equal(crossSiteLogout.response.headers.get('set-cookie'), null);
+
+    const sessionAfterRejectedLogout = await request(baseUrl, '/api/session', { headers: { Cookie: issued.cookie } });
+    assert.equal(sessionAfterRejectedLogout.body.authentication.authenticated, true);
+
     const logout = await request(baseUrl, '/api/auth/logout', { method: 'POST', headers: { Cookie: issued.cookie, Origin: baseUrl } });
     assert.equal(logout.response.status, 204);
     assert.match(logout.response.headers.get('set-cookie') || '', /Max-Age=0/i);
@@ -185,6 +213,11 @@ test('browser operator session preserves role authorization without storing the 
 
     const sessionAfterLogout = await request(baseUrl, '/api/session');
     assert.equal(sessionAfterLogout.body.authentication.authenticated, false);
+
+    const anonymousLogout = await request(baseUrl, '/api/auth/logout', { method: 'POST', headers: { Origin: baseUrl } });
+    assert.equal(anonymousLogout.response.status, 401);
+    assert.equal(anonymousLogout.body.error.code, 'session_authentication_required');
+    assert.equal(anonymousLogout.response.headers.get('set-cookie'), null);
   });
 });
 

@@ -122,6 +122,7 @@ test('formal variations preserve exact replay, client revision control, and veri
   assert.equal(portal.job.variations[0].responseAllowed, true);
   const downloaded = ledger.getClientPortalChangeOrderIssuePackage(access.portalToken, first.id);
   assert.equal(downloaded.packageHash, firstIssue.packageHash);
+  assert.equal(downloaded.filename, `${first.variationNumber}-R1-${firstIssue.issueReference}.html`);
 
   const requestedRevision = ledger.submitClientPortalChangeOrderResponse(access.portalToken, first.id, {
     responseId: 'variation-response-0001',

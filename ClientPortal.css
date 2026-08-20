@@ -80,8 +80,9 @@
 .client-variation-facts span:first-child { border-left: 0; }
 .client-variation-facts small { color: #71807a; font-size: 10px; font-weight: 700; text-transform: uppercase; }
 .client-variation-facts strong { overflow-wrap: anywhere; font-size: 12px; text-transform: capitalize; }
-.client-variation-download { display: inline-flex; width: fit-content; min-height: 34px; align-items: center; gap: 7px; padding: 0 10px; color: #0b6554; font-size: 12px; font-weight: 750; text-decoration: none; border: 1px solid #a8c9bf; border-radius: 5px; }
+.client-variation-download { display: inline-flex; width: fit-content; min-height: 34px; align-items: center; gap: 7px; padding: 0 10px; color: #0b6554; background: #fff; font: inherit; font-size: 12px; font-weight: 750; text-decoration: none; border: 1px solid #a8c9bf; border-radius: 5px; cursor: pointer; }
 .client-variation-download:hover { color: #fff; background: #0b6554; border-color: #0b6554; }
+.client-variation-download:disabled { cursor: wait; opacity: .65; }
 .client-variation-result { margin: 0; color: #356a5c; font-size: 12px; font-weight: 650; line-height: 1.45; }
 .client-variation-response-fields { display: grid; align-content: start; gap: 10px; }
 .client-variation-response-fields > label { display: grid; gap: 6px; color: #40564e; font-size: 12px; font-weight: 700; }

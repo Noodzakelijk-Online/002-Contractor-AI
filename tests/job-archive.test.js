@@ -80,7 +80,8 @@ test('job archive and restore are reversible approval-gated ledger workflows', a
     body: JSON.stringify({ status: 'approved', resolvedBy: 'Lifecycle portal approver' })
   });
   assert.equal(portalApproval.response.status, 200);
-  const activePortal = await request(baseUrl, `/api/client-portal/${encodeURIComponent(portalAccess.body.access.portalToken)}`);
+  const portalAuthorization = { Authorization: `Bearer ${portalAccess.body.access.portalToken}` };
+  const activePortal = await request(baseUrl, '/api/client-portal', { headers: portalAuthorization });
   assert.equal(activePortal.response.status, 200);
 
   const worker = await request(baseUrl, '/api/ledger/workers', {
@@ -167,7 +168,7 @@ test('job archive and restore are reversible approval-gated ledger workflows', a
   assert.match(revokedPortalAccess.data.revocation.reason, /Job archived through approval/);
   assert.equal(archived.body.job.quotes.length, retainedQuoteCount);
 
-  const closedPortal = await request(baseUrl, `/api/client-portal/${encodeURIComponent(portalAccess.body.access.portalToken)}`);
+  const closedPortal = await request(baseUrl, '/api/client-portal', { headers: portalAuthorization });
   assert.equal(closedPortal.response.status, 404);
 
   const blockedMutations = [

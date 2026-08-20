@@ -1,316 +1,748 @@
 # Contractor.AI
 
-Contractor.AI is a local-first operating system for Dutch and European contractor teams. It keeps opportunities, jobs, project controls, approvals, dispatch, field evidence, finance handoffs and autonomous internal drafts in one persisted operating ledger.
+[![Verify Contractor.AI](https://github.com/Robert-Velhorst/002-Contractor-AI/actions/workflows/verify.yml/badge.svg)](https://github.com/Robert-Velhorst/002-Contractor-AI/actions/workflows/verify.yml)
 
-Operator shell language is retained per trusted principal (`en-GB` or `nl-NL`). Each approval-gated client portal link has its own retained language and the client can switch it from the portal. Locale changes affect interface copy and number/date/currency presentation; they do not translate retained project content supplied by operators or clients.
+Contractor.AI is a local-first operations platform for building contractors in
+the Netherlands and the wider European market. It brings lead qualification,
+estimating, project controls, approvals, field records, workforce planning,
+procurement, finance evidence, client communication, closeout, and internal
+automation into one auditable operating ledger.
 
-The Node application is the sole product runtime. The dashboard is a React/Vite client that uses only the ledger API. Python prototypes, simulated dashboards and separate mock databases are retired.
+It is not a marketing demo or a collection of disconnected prototypes. The
+product runtime is a Node.js 22 application with an Express API, a React/Vite
+interface, a transactional SQLite or PostgreSQL ledger, and private evidence
+storage. The same application runs on one Windows laptop, in a local container,
+or as a fail-closed EU-hosted deployment.
 
-The manifest-level comparison of the supplied legacy archives and the decisions
-to port, retain, or exclude their capability families are recorded in the
-[archive port audit](docs/ARCHIVE_PORT_AUDIT.md).
+> **Important:** Contractor.AI prepares and governs work; it does not silently
+> send messages, place orders, commit dates, issue financial claims, initiate
+> payments, or certify compliance. Consequential actions remain separated into
+> evidence, review, approval, package, and verified-delivery stages.
 
-The current stabilization evidence is indexed by the
-[technical audit](docs/TECHNICAL_AUDIT.md),
-[goal completion matrix](docs/GOAL_COMPLETION_MATRIX.md),
-[acceptance tests](docs/ACCEPTANCE_TESTS.md), and
-[operator runbook](docs/OPERATOR_RUNBOOK.md). These documents distinguish local
-release evidence from provider-, legal-, and infrastructure-dependent production
-work.
+## Contents
 
-The Performance screen includes the complete retained operating-framework catalog:
-23 families, 671 unique frameworks, and 700 family memberships. Operators can
-search and filter the catalog, retain organization- or project-scoped objectives,
-owners, evidence, measures, decisions, review dates, and inspect immutable revision
-history. Each family includes a maintained method playbook with review steps,
-scope, cadence, evidence prompts, measure candidates, and safeguards. The starter
-can fill an empty review date and success measures, but never creates evidence or
-proof. A framework record governs the team's use of a method; it does not claim
-legal certification, replace a method-specific qualified professional, or authorize
-an external action.
+- [The short version](#the-short-version)
+- [Who it is for](#who-it-is-for)
+- [What the product covers](#what-the-product-covers)
+- [How a job moves through the system](#how-a-job-moves-through-the-system)
+- [Roles and access](#roles-and-access)
+- [Automation and safety model](#automation-and-safety-model)
+- [Architecture](#architecture)
+- [Runtime modes](#runtime-modes)
+- [Quick start](#quick-start)
+- [Daily operation](#daily-operation)
+- [Configuration](#configuration)
+- [Data, evidence, backup, and restore](#data-evidence-backup-and-restore)
+- [API contract](#api-contract)
+- [Security and privacy](#security-and-privacy)
+- [EU-hosted production](#eu-hosted-production)
+- [Development workflow](#development-workflow)
+- [Verification and CI](#verification-and-ci)
+- [Repository map](#repository-map)
+- [Documentation index](#documentation-index)
+- [Current boundaries](#current-boundaries)
 
-## Local Use
+## The short version
 
-Requirements: Node.js 22 and npm.
+For an owner or project team, Contractor.AI provides one place to answer:
+
+- Which opportunities should we pursue, and why?
+- What scope, quantities, risks, price, and programme have we retained?
+- Which decisions still need a named human approver?
+- Are the correct people, tools, documents, materials, and permits ready?
+- What happened on site, who recorded it, and what evidence supports it?
+- Which costs, commitments, invoices, payments, and forecasts are recognized?
+- What has the client seen, accepted, rejected, or asked to change?
+- Can we prove the history without rewriting earlier records?
+- What can the system safely draft next without making an external commitment?
+
+For a developer, the defining rules are:
+
+1. `server.js` is the HTTP and runtime boundary.
+2. `operating-ledger.js` owns durable business rules and migrations.
+3. `/api/ledger/*` is the authoritative product API.
+4. `App.jsx` and `ClientPortal.jsx` are the only product interfaces.
+5. SQLite plus local files is the default local mode.
+6. PostgreSQL plus private S3-compatible storage is the hosted mode.
+7. Audit, approval, idempotency, source hashes, and provider receipts are part
+   of the business contract, not optional logging.
+
+## Who it is for
+
+Contractor.AI is designed for small and medium contractor organizations that
+need operational discipline without starting with a large cloud rollout.
+
+| User | Typical use |
+| --- | --- |
+| Owner / director | Business identity, risk, approvals, team access, recovery, audit, and performance |
+| Estimator / office operator | Intake, takeoff, estimating, scope, tendering, planning, procurement, and finance evidence |
+| Approver | Independent review of retained decisions and their exact effects |
+| Site manager / field worker | Assigned work, safety controls, progress, evidence, attendance, materials, and daily records |
+| Client | A narrow, expiring, approval-gated project portal |
+| Developer / operator | Local deployment, migration, diagnostics, integration, and release verification |
+
+It is **not** a payroll system, bank, certified accounting package, Peppol access
+point, emergency service, statutory safety register, legal adviser, or automatic
+AI decision maker. It can prepare controlled handoffs to those domains, but the
+real provider, legal, and professional acceptance work remains external.
+
+## What the product covers
+
+The interface has twelve primary workspaces: **Today, Pipeline, Jobs, Schedule,
+Approvals, Dispatch, Resources, Finance, Performance, Clients, Field,** and
+**Operations**. Access is filtered by role.
+
+### Business setup and governance
+
+- Retained organization identity for quotes and governed packages.
+- Named deployment-controlled and managed operator accounts.
+- One-time access-key issue and rotation; only hashes are retained.
+- English (`en-GB`) and Dutch (`nl-NL`) preferences per trusted principal.
+- Chained, queryable audit history and integrity diagnostics.
+- Approval separation, exact decision summaries, safeguards, and resolver audit.
+- Privacy-rights request intake, identity verification, assessment, approval,
+  restriction, correction, export, and supportable erasure outcomes.
+- Non-destructive job archive and controlled restore.
+- QA/demo preview, verified backup, and atomic archive maintenance.
+
+### Opportunity and preconstruction
+
+- Opportunity intake, activities, follow-up, status, and conversion controls.
+- Retained Ideal Customer Profile and service-area policy.
+- Weighted, source-bound market-fit assessment.
+- Bid/no-bid decisions with human approval.
+- Site-survey plans, submissions, private evidence, and approval.
+- Trade-partner directory and compliance evidence.
+- Bid packages, bidder returns, normalized comparison, preferred-bidder review,
+  and source-verified purchase commitment preparation.
+
+### Scope, takeoff, estimating, and commercial control
+
+- Written scope, assumptions, exclusions, allowances, and pricing basis.
+- Project risk register and premortem revisions.
+- Count, linear, area, volume, and manual quantity takeoffs.
+- WBS work packages, waste factors, rate build-ups, margin, VAT, and totals
+  calculated by the server.
+- Estimate-rate policies and traceable estimate conversion.
+- Quote approval, immutable HTML issue package, separate delivery approval,
+  verified delivery receipt, and client-acceptance evidence.
+- Formal variations / meer- en minderwerk with sequential package numbers,
+  revision history, source and snapshot hashes, response deadlines, and verified
+  client decisions.
+- Replay-safe daywork tickets for labour, material, equipment, subcontract, and
+  other measured quantities.
+
+### Planning and project control
+
+- Portfolio schedule and job-level plans.
+- Dependency-aware work plans and critical-path baselines.
+- Two-week crew-capacity planning and assignment conflict controls.
+- Last Planner weekly commitments, constraints, reasons, and learning.
+- Tasks, milestones, RFIs, submittals, meetings, minutes, and action carry-forward.
+- Production baselines, installed-output capture, labour-performance variance,
+  and approval-backed reversals.
+- Daily start huddles and end-of-day operating cycles.
+- Weather observations as retained planning evidence, not schedule commitments.
+
+### Workforce, site, safety, and quality
+
+- Worker directory, availability, qualifications, credential revisions, and
+  role/job requirements.
+- Assignment, dispatch, retirement, and readiness controls.
+- Site orientation, access, attendance, and approval-backed attendance correction.
+- Work permits, pre-task plans, LMRA, JHA, safety briefings, and acknowledgements.
+- Current, checksum-bound SDS and drawing revisions with controlled supersession.
+- Inspection templates, immutable checklist submissions, installation QC,
+  observations, NCRs, punch items, and corrective actions.
+- Before/during/after photo evidence and private file retention.
+- Field reports, daily logs, progress, safety incidents, and material receipts.
+- 5S workplace assessments and retained improvement actions.
+
+### Resources, materials, and procurement
+
+- Worker, equipment, and tool registers.
+- Reservation, assignment, custody, handoff, return, damage, loss, and quarantine.
+- Material requirements and discrepancy-aware receiving records.
+- Trade-partner compliance gates for VAT/registration, insurance, and VCA evidence.
+- Purchase requests, approvals, purchase orders, immutable HTML and generic UBL
+  2.1 Order packages, separate transmission approval, and verified delivery.
+- No supplier is contacted and no order is considered sent merely because an
+  internal approval or package exists.
+
+### Finance evidence and forecasting
+
+- Budget lines and recognized job-cost evidence.
+- Worker expense receipts with VAT treatment, duplicate controls, and reversal.
+- Supplier invoices, purchase-order and receipt matching, duplicate protection,
+  approval exceptions, and evidence-only payment records.
+- Billing milestones and one-to-one invoice sourcing.
+- Invoice approval, immutable HTML/UBL package, delivery approval, and verified
+  provider receipt.
+- Approval-gated credit notes instead of editing issued invoice evidence.
+- Payment reconciliation and receivable state without initiating money movement.
+- Cost-code forecasts, commitments, earned-value signals, projected margin, and
+  immutable forecast snapshots.
+- Thirteen-week cash-flow forecasts and weekly timesheet handoff packages.
+- Environmental activity evidence and source-current emissions-report packages;
+  Contractor.AI does not select official factors or claim certification.
+
+### Client success and closeout
+
+- Client directory and project communication history.
+- Outbound drafts that require review and a verified integration receipt.
+- Approval-gated, scoped, expiring, and revocable client portal access.
+- Portal project snapshot, language preference, messages, selections, formal
+  variation package download/response, and project-experience feedback.
+- Client portal capabilities are sent in an `Authorization` header, not a URL.
+- Handover readiness, immutable handover packages, warranty, aftercare, feedback,
+  and archived-project history.
+
+### Performance and operating frameworks
+
+- Operational performance scorecards and retained review evidence.
+- A catalog of 23 framework families, 671 unique frameworks, and 700 family
+  memberships.
+- Search, family filters, organization/job scope, objectives, owners, evidence,
+  measures, decisions, review dates, and immutable revisions.
+- Method playbooks with cadence, evidence prompts, possible measures, review
+  steps, and safeguards.
+- Framework starters may suggest empty measures or dates; they never fabricate
+  evidence, certification, or proof.
+
+## How a job moves through the system
+
+```text
+Opportunity
+  -> market fit and site evidence
+  -> bid/no-bid approval
+  -> controlled conversion to a job
+  -> written scope, risk, takeoff, estimate, and quote
+  -> quote package, delivery evidence, and client acceptance
+  -> schedule, crew, permits, documents, and dispatch readiness
+  -> daily field execution, evidence, cost, quality, and safety records
+  -> approved variations, procurement, billing, and reconciliation
+  -> handover, warranty, feedback, archive, and retained audit history
+```
+
+Every arrow is a retained state transition. High-impact transitions generally
+create a pending approval instead of changing the final state immediately. The
+approval is resolved against the exact retained source and is rejected when that
+source has changed.
+
+## Roles and access
+
+| Role | Authority |
+| --- | --- |
+| `owner` | Full organization operation, team access, recovery, diagnostics, safety stop, and approvals |
+| `approver` | Read ledger evidence and resolve permitted approvals |
+| `office_operator` | Office, commercial, planning, field-control, procurement, and finance preparation; cannot resolve approvals |
+| `field_worker` | Assigned jobs and explicitly permitted field workflows only |
+| Client portal capability | One approved job view and a narrow set of client responses until expiry or revocation |
+
+Production keys must be independent, non-template secrets of at least 32
+characters. Browser sign-in exchanges a key for a signed, revocable, `HttpOnly`,
+`SameSite=Strict` cookie (`Secure` in production). API clients can use bearer or
+API-key headers. Keys, cookies, and portal capabilities are not placed in browser
+storage.
+
+## Automation and safety model
+
+The name Contractor.AI describes an assisted operating system, not unrestricted
+machine authority. The current autonomous engine is ledger-first and deterministic:
+
+- It inspects retained open loops and capability gaps.
+- It can prepare internal drafts, checks, tasks, reminders, and approval records.
+- It uses idempotency keys and a durable database lease.
+- Multiple hosted replicas cannot own the same scheduled cycle.
+- Changed retries and stale lease owners fail closed.
+- An owner can suspend or resume autonomous work with an audited reason.
+- Dry-run diagnosis remains available while automation is suspended.
+
+It cannot independently:
+
+- send a client or supplier message;
+- accept scope, price, or a contract;
+- promise a date or alter an approved programme;
+- place a purchase order or appoint a subcontractor;
+- issue an invoice to a provider;
+- make, initiate, or confirm a bank payment;
+- certify safety, quality, energy, environmental, tax, or legal compliance;
+- call emergency services or stop physical equipment.
+
+External delivery state changes only after a separate approval and an allowlisted
+provider receipt configured through `CONTRACTOR_AI_VERIFIED_INTEGRATIONS`.
+
+## Architecture
+
+```mermaid
+flowchart LR
+  Operator[Operator React app] --> API[Node.js / Express API]
+  Client[Scoped client portal] --> API
+  API --> Ledger[Operating ledger and business rules]
+  Ledger --> DB[(SQLite local / PostgreSQL hosted)]
+  API --> Storage[(Local private files / EU S3-compatible storage)]
+  Scheduler[Durable autonomous scheduler] --> Ledger
+  HAI[Optional read-only HAI feed] <-->|GenericItem JSON| API
+  Provider[Verified external provider] -->|delivery receipt only| API
+```
+
+| Component | Responsibility |
+| --- | --- |
+| `server.js` | Runtime configuration, HTTP middleware, authentication, authorization, uploads, API routes, readiness, and production static serving |
+| `operating-ledger.js` | Business invariants, transactions, schema, migrations, audit, approvals, idempotency, local and hosted persistence contract |
+| `postgres-sync-database.js` / worker | Synchronous ledger adapter over a dedicated PostgreSQL worker |
+| `evidence-storage.js` | Private local and S3-compatible evidence storage |
+| `App.jsx` | Role-aware operator application |
+| `ClientPortal.jsx` | Scoped client application; capability begins in the link fragment and moves to request headers |
+| `framework-catalog.js` | Validated operating-framework catalog and playbooks |
+| `hai-connector.js` | Bounded read-only HAI `GenericItem` projection |
+| `backup-manifest.js` | Signed local backup manifest and integrity contract |
+| `runtime-lock.js` | Exclusive local runtime/restore lease |
+
+The React production build is served by Express. There is no second Python
+runtime, mock API, public evidence directory, or alternate dashboard.
+
+## Runtime modes
+
+| Mode | Database | Evidence | Exposure | Intended use |
+| --- | --- | --- | --- | --- |
+| Local development | SQLite | Local private directory | Explicit loopback | Development and evaluation |
+| Windows standalone | SQLite | `%LOCALAPPDATA%\ContractorAI` | Loopback with generated owner key | Day-to-day single-machine use |
+| Authenticated ngrok | Same local SQLite | Same local files | Temporary verified HTTPS tunnel | Controlled temporary remote access |
+| Local Docker | SQLite in named volume | Named volume | Host-loopback port, authentication required | Container evaluation |
+| EU hosted | Managed PostgreSQL | Private EU S3-compatible bucket | HTTPS ingress with explicit proxy trust | Durable multi-user production |
+
+The tunnel is not hosted mode: it does not move the ledger, evidence, backup, or
+recovery responsibility off the local machine.
+
+## Quick start
+
+### Run locally
+
+Requirements: Node.js 22.x and npm on Windows, macOS, or Linux.
 
 ```powershell
-Copy-Item .env.example .env # optional; use this when overriding local defaults
-npm install
+git clone https://github.com/Robert-Velhorst/002-Contractor-AI.git
+Set-Location 002-Contractor-AI
+npm ci
 npm run build
 npm start
 ```
 
-Open `http://localhost:3000`. For development, start the API with `npm run dev:api` and the Vite client with `npm run dev`.
+Open [http://127.0.0.1:3000](http://127.0.0.1:3000).
 
-Owners can run a minimized readiness and support diagnostic against a live process:
+Local development defaults to credential-free loopback access. Requests with a
+foreign `Host` value and any non-loopback credential-free listener are rejected.
+Set `CONTRACTOR_AI_REQUIRE_AUTH=true` and configure strong role keys when other
+processes or users need authenticated access.
+
+### Develop the API and interface separately
 
 ```powershell
-npm run doctor -- --url http://localhost:3000 --token <owner-role-key>
+# Terminal 1
+npm run dev:api
+
+# Terminal 2
+npm run dev
 ```
 
-The support output contains aggregate runtime and integrity state, not customer
-records, evidence contents, logs, environment values, or credentials.
+Open [http://127.0.0.1:5173](http://127.0.0.1:5173). Vite proxies `/api` and the
+client portal to the Node service on port 3000.
 
-### Windows 11 standalone
+### Windows standalone
 
-The release workflow produces `ContractorAI-windows-x64.zip`. It contains a
-pinned Node.js 22 runtime, the production dashboard, and production-only
-dependencies, so the operator does not need to install Node or npm. Start
-`ContractorAI.cmd`. On first use it creates a random owner access key and keeps
-the ledger, evidence, and configuration under `%LOCALAPPDATA%\ContractorAI`.
-The server binds to `127.0.0.1` and opens the local dashboard. See
-[Windows standalone operation](docs/WINDOWS_STANDALONE.md).
+The release workflow creates `ContractorAI-windows-x64.zip` with Node.js 22, the
+production build, and production dependencies. Extract it and run
+`ContractorAI.cmd`. The launcher creates a random owner key on first start,
+stores configuration and data under `%LOCALAPPDATA%\ContractorAI`, binds to
+`127.0.0.1`, and opens the dashboard.
 
-### Authenticated ngrok access
+See [Windows standalone operation](docs/WINDOWS_STANDALONE.md).
 
-`npm run start:tunnel` creates an HTTPS ngrok tunnel to the loopback-only local
-server. It refuses to open a listener unless `NGROK_AUTHTOKEN` and a strong
-Contractor.AI owner key are configured. Before printing the public URL, it proves
-local storage/database readiness, confirms that the public readiness route rejects
-anonymous access, and validates the authenticated public projection against the
-exact HTTPS origin and loopback bind. Failed verification closes public ingress
-and the local runtime. The tunnel does not move the SQLite
-ledger or evidence to cloud storage and is not the durable EU-hosted mode. The
-portable package provides `ContractorAI-Tunnel.cmd` using the same local owner
-key. See [ngrok operation](docs/NGROK.md).
+### Local Docker
 
-### HAI connector
+Container networking requires authentication because the process listens on a
+container interface even though the published host port is loopback-only. Set a
+strong owner key in an ignored `.env`, then run:
 
-The owner-only HAI connector exposes deterministic, read-only internal action
-summaries through `/api/integrations/hai/feed`. `npm run export:hai` writes that
-`accountfeed.GenericItem` JSON feed atomically to an absolute operator-selected
-path. When `CONTRACTOR_AI_HAI_FEED_PATH` is configured, the Operations screen
-shows the verified publication state and lets the owner atomically publish the
-current read-only feed directly. HAI can register it as its existing `generic_json_feed` /
-`local_json_file` source and derives `review_document` from the retained
-`document` item type. It cannot execute a Contractor.AI command or create an
-external commitment. Run `npm run verify:hai-contract` for the native contract,
-or pass `--hai-root` to execute the maintained HAI parser. See
-[HAI connector setup](docs/HAI_CONNECTOR.md).
+```powershell
+Copy-Item .env.example .env
+# Edit .env: CONTRACTOR_AI_REQUIRE_AUTH=true and set CONTRACTOR_AI_AUTH_TOKEN.
+docker compose up --build
+```
 
-Local ledger records live beside `CONTRACTOR_AI_DATA_DIR` and are intentionally ignored by Git. A pre-ledger `STATE_FILE` is read only once when the ledger is empty, then remains an optional migration source and is never written by the application. Use the Operations screen to retain the owner-controlled business identity used on quote packages, manage named team access, operate approval-gated privacy-rights requests, inspect and filter the chained audit history, create, verify, and download a backup, export an operator-readable ledger snapshot, inspect archived jobs, request a controlled restore, and preview then archive eligible QA/demo jobs, non-won opportunities, workers, and tools. Privacy handling is documented in [Privacy rights operations](docs/PRIVACY_OPERATIONS.md). A QA archive rechecks its preview, creates and verifies a backup, then applies one atomic ledger transaction. Move downloaded packages to encrypted off-device storage so a disk or host failure cannot remove both the live ledger and its recovery copy.
+Data is retained in the `contractor-ai-data` named volume.
 
-To restore a verified SQLite backup, stop the local Contractor.AI process first, then run:
+## Daily operation
+
+1. Complete **Operations -> Business identity** before issuing packages.
+2. Configure named team access and link field principals to retained workers.
+3. Review **Today** for blockers, approvals, dispatch gaps, expired evidence,
+   finance exceptions, and autonomous suggestions.
+4. Use **Pipeline** for opportunities and **Jobs** for accepted work.
+5. Resolve approvals from their exact evidence, effect, and safeguards.
+6. Use **Field** for assigned execution and evidence capture.
+7. Verify provider readiness before recording an external delivery receipt.
+8. Review the audit chain and readiness diagnostics.
+9. Create, verify, download, and move backups off-device.
+10. Archive completed work instead of deleting its history.
+
+Owner diagnostic:
+
+```powershell
+npm run doctor -- --url http://127.0.0.1:3000 --token <owner-key>
+```
+
+The support bundle contains runtime version, readiness, migrations, aggregate
+counts, audit integrity, and automation state. It excludes customer records,
+evidence bodies, logs, environment values, tokens, cookies, connection strings,
+and storage credentials.
+
+## Configuration
+
+Local defaults work without an environment file. Copy `.env.example` only when
+you need overrides. Never commit `.env`, `.env.hosted`, keys, provider receipts,
+backups, or runtime data.
+
+### Core settings
+
+| Variable | Purpose |
+| --- | --- |
+| `PORT` | HTTP port, default `3000` |
+| `CONTRACTOR_AI_BIND_HOST` | Listener; credential-free operation must use loopback |
+| `CONTRACTOR_AI_RUNTIME_MODE` | `local` or `hosted` |
+| `CONTRACTOR_AI_STORAGE_MODE` | `local` or `s3` |
+| `STATE_FILE` | Optional one-time legacy migration source; the application does not write it |
+| `LEDGER_DB_FILE` | Local SQLite path |
+| `UPLOAD_DIR` | Local private evidence directory |
+| `CONTRACTOR_AI_RELEASE_SHA` | Deployed immutable revision identifier |
+
+### Authentication and network settings
+
+| Variable | Purpose |
+| --- | --- |
+| `CONTRACTOR_AI_REQUIRE_AUTH` | Require authentication in local mode |
+| `CONTRACTOR_AI_AUTH_TOKEN` | Bootstrap/static owner key, minimum 32 characters |
+| `CONTRACTOR_AI_ROLE_TOKENS` | JSON role/principal definitions and optional field scope |
+| `CONTRACTOR_AI_BACKUP_SIGNING_KEY` | HMAC key for authenticated local backup manifests |
+| `CORS_ORIGINS` | Exact browser origins allowed by the API |
+| `CONTRACTOR_AI_TRUST_PROXY` | Exact proxy IP/CIDR or accepted named subnet; no wildcard or hop count |
+| `CONTRACTOR_AI_SESSION_TTL_SECONDS` | Browser session lifetime, bounded to 15 minutes - 24 hours |
+| `CONTRACTOR_AI_LOGIN_RATE_*` | Durable sign-in throttle settings |
+| `CONTRACTOR_AI_RATE_*` | Durable API rate-limit settings |
+
+### Optional local services
+
+| Variable | Purpose |
+| --- | --- |
+| `CONTRACTOR_AI_HAI_FEED_PATH` | Absolute path for atomic read-only HAI feed publication |
+| `NGROK_AUTHTOKEN` | ngrok agent credential used only by the verified tunnel launcher |
+| `CONTRACTOR_AI_VERIFIED_INTEGRATIONS` | Provider identifiers permitted for delivery receipts |
+| `CONTRACTOR_AI_AUTONOMOUS_SCHEDULER_ENABLED` | Opt in to durable internal scheduler cycles |
+| `CONTRACTOR_AI_AUTONOMOUS_INTERVAL_SECONDS` | Scheduler poll interval |
+| `CONTRACTOR_AI_AUTONOMOUS_LEASE_SECONDS` | Durable cycle lease duration |
+
+Hosted PostgreSQL, S3, residency, DPA, retention, recovery, and ingress variables
+are documented in `.env.hosted.example` and [EU hosting](docs/EU_HOSTING.md).
+
+## Data, evidence, backup, and restore
+
+### Local persistence
+
+- Business records and audit history live in SQLite.
+- Evidence lives under the private configured `UPLOAD_DIR`.
+- Evidence is never served as a public static folder.
+- Uploads accept bounded JPEG, PNG, WebP, PDF, and DOCX files after filename,
+  extension, MIME, binary-signature, path, size, ownership, and checksum checks.
+- An `Idempotency-Key` makes exact upload retries replay-safe and rejects changed
+  content under the same key.
+- One process owns the local data directory through an exclusive runtime lock.
+
+### Local backup
+
+The owner can create and verify a signed backup from **Operations**. Manifest v3
+contains the SQLite ledger, completed evidence, an operator-readable export,
+path/size/SHA-256 metadata, and an HMAC-SHA256 manifest signature. Backup staging
+is hidden and published atomically. Symlinks, temporary files, duplicate or unsafe
+paths, missing entries, metadata drift, and checksum drift fail verification.
+
+### Local restore
+
+Stop Contractor.AI first:
 
 ```powershell
 tar -xzf contractor-ai-backup-<backup-id>.tar.gz -C ./data/backups
 npm run restore:local -- --backup-id <backup-id> --confirm RESTORE_<backup-id>
 ```
 
-The download endpoint streams a private `tar.gz` package only after verifying every manifest entry. Extracting it into `data/backups` recreates the `<backup-id>` directory expected by the stopped-runtime restore command. Backup manifest v3 includes the SQLite ledger and every completed private evidence file under `UPLOAD_DIR`, and authenticates the complete manifest with HMAC-SHA256 using `CONTRACTOR_AI_BACKUP_SIGNING_KEY`; duplicate paths, temporary writes, symlinks, unsafe paths, missing files, changed metadata, and checksum changes fail verification. Restore acquires the same exclusive local runtime lease as the server, stages and validates the full package, saves the current ledger and evidence as a `pre-restore-*` package, and rolls both back if any live replacement fails. Restored browser sessions are revoked and all restored managed operator accounts are deactivated so older credentials cannot be resurrected; the owner must issue replacement keys after restart. Manifest v1/v2 compatibility requires the explicit `--allow-legacy-unsigned` flag and does not add authenticity to those historical packages. Hosted PostgreSQL recovery remains a managed provider procedure.
+Restore takes the same exclusive lock as the runtime, validates and stages the
+complete package, creates a pre-restore recovery point, and rolls back both the
+ledger and evidence if replacement fails. Restored browser sessions are revoked
+and restored managed accounts are deactivated; the owner must issue new keys.
+Legacy unsigned backup versions require an explicit compatibility flag and do
+not gain authenticity retroactively.
 
-## Safety Model
+Hosted recovery uses managed PostgreSQL snapshots/PITR and object versioning.
+Application-local backup endpoints intentionally refuse to claim hosted recovery.
 
-- The ledger is the source of truth for jobs, work, approvals and audit evidence.
-- Audit evidence is append-chained with SHA-256 inside the same database transaction as each retained business change. Sequence gaps, payload rewrites, deleted events, and a stale chain head make diagnostics and readiness fail; owners can run a fresh verification through `/api/operations/audit-integrity`.
-- Autonomous cycles create internal drafts, reminders and approval records only.
-- Contractor.AI never sends a message, confirms a date, commits supplier spend, invoices, or makes payment claims without a verified integration and a resolved approval.
-- Mandatory lifecycle and procurement gates cannot be disabled by a request payload. Rejected or cancelled approvals restore the prior retained state so the operator can revise and resubmit without leaving a deadlocked `pending_approval` record.
-- Estimate and change-order totals are calculated from validated retained line items on the server. Intake without a positive estimate or explicit line items does not invent a zero-value quote. Internal approval permits review or issue preparation but does not establish client acceptance or alter contract value. An approved quote can produce one immutable, checksum-protected HTML issue package and one separate outbound communication draft; package preparation neither sends the draft nor changes the contract. Quote and scope-change acceptance require a separate dated evidence reference and approver verification; contract value is retained net of VAT from the accepted quote baseline plus accepted change orders.
-- An internally approved scope change must be frozen into a sequentially numbered, checksum-protected HTML package before it can be issued. Package preparation creates a separate recipient-specific communication approval and does not alter contract value. Only an allowlisted provider receipt marks the change order `issued`; acceptance verification is then bound to that package reference, source hash, delivery record, and provider message before the accepted net change enters contract value.
-- Quantity takeoffs retain count, linear, area, volume, or manual measurements with server-derived waste, quantity, cost, sell, margin, VAT, and total values. Draft measurements remain editable; conversion seals the measured basis with a SHA-256 snapshot and creates one traceable approval-gated estimate. Conversion never issues the estimate, contacts the client, or changes contract value.
-- Daywork and `meerwerk` tickets retain replay-safe field or office capture of observed labor, material, equipment, subcontract, and other quantities with an immutable source and snapshot hash. Internal approval verifies the site record; optional client acknowledgement has its own evidence review and confirms receipt only. Office pricing can convert the exact retained lines into a separate approval-gated change order, but no step accepts scope or price, changes contract value, contacts the client, orders materials, commits dates, invoices, pays, or moves funds.
-- Bid packages retain internal bidder lists, immutable return evidence, a server-derived comparison hash, and an approval-gated preferred bidder. After opportunity conversion, the exact selected return can be frozen into one source-verified purchase commitment and independently approved as ready to order. Selection and commitment approval never contact the supplier, transmit an award or order, sign a subcontract, or move money.
-- Market-fit control retains an owner-requested, approval-gated Ideal Customer Profile with service lines, client segments, lead sources, job-value bands, and a country/postal/city service-area matrix. Five fixed weighted criteria produce source-bound advisory `pursue`, `review`, or `decline` results; they never reject a lead, contact a client, create a job, or make a commitment.
-- Procurement and purchase approvals require an active retained trade partner with current registration, VAT or verified exemption, verification evidence, and any required insurance or VCA expiry evidence. Compliance is re-checked transactionally when the approval is resolved; a failed check leaves the approval pending.
-- An approved purchase order can be frozen into an immutable, sequentially numbered HTML and generic OASIS UBL 2.1 Order package. Package preparation creates a separate recipient-specific transmission approval and no external commitment. Only an allowlisted provider receipt against the approved communication marks the order `ordered` and records one supplier commitment. This export is not Peppol-certified and Contractor.AI does not submit it to a network.
-- Crew records are retained people resources, not payroll or messaging accounts. Direct retirement and edits to retired records are blocked. Operational assignments block retirement; assignments retained on inactive or archived jobs are reported separately and released inside the approved retirement transaction so restoring a job cannot reactivate a retired worker.
-- An approved outbound communication can only be marked delivered through `/api/ledger/communications/:id/delivery-receipt` with an allowlisted `CONTRACTOR_AI_VERIFIED_INTEGRATIONS` provider identifier; the receipt is retained in the audit trail.
-- Invoice issue is split into draft approval, immutable package preparation, delivery approval, and verified delivery receipt. HTML and UBL attachments are regenerated from their retained snapshot and checksum-verified before download, delivery approval, and receipt recording. UBL export preparation is not a certification or network-submission claim; provider transport remains disabled until explicitly configured.
-- Issued invoices are corrected through approval-gated credit notes instead of editing retained invoice evidence. A draft reserves its exact gross amount against concurrent payment or credit requests; approval permits package preparation, and only a numbered immutable HTML/UBL CreditNote package adjusts the receivable. The correction retains the original invoice number and issue date, uses the source VAT rate, and requires a separately approved verified delivery receipt.
-- Supplier invoices retain the original supplier reference, VAT split, due date, purchase-order and delivery links, and a duplicate-resistant supplier/reference key. Approval requires a three-way match or an explicit exception reason. Supplier payment records require a separate approval, reject duplicate references and overpayment, and retain external bank evidence only; Contractor.AI never initiates or claims to initiate a transfer.
-- Expense receipts retain a stable retry key, duplicate-resistant source identity, assigned worker, date, gross total, VAT split and treatment, payment method, cost code, and evidence reference. Pending receipts do not enter actual job cost. Approval rechecks the immutable source fingerprint; corrections use approval-backed compensating reversal while preserving the original. Field and autonomous workflows cannot reimburse a worker, settle a card, contact a vendor, export bookkeeping data, or move funds.
-- Environmental activities retain a stable retry key, assigned worker, date, GHG scope, measured quantity and unit, operator-supplied emission factor, factor source/reference, and activity evidence. The server calculates kg CO2e, but nothing enters the recognized register before approval. Corrections use approval-backed compensating reversal. Current approved sources can be frozen into an immutable source-hashed, snapshot-hashed, SHA-256 CSV report; historical approved packages remain downloadable and are marked stale when later approved source changes. Contractor.AI does not claim footprint certification, select official factors, submit a report, buy offsets, or create an external commitment.
-- Cost forecasts are calculated from approved budget lines, retained labor and expense evidence, issued purchase-order commitments, authorized-but-not-issued orders, and approved supplier invoices. A linked supplier invoice reduces the remaining order commitment before totals are calculated, preventing that cost from being counted twice. Mixed-currency sources and missing approved budgets block a snapshot. `FC-YYYY-NNNNNN` snapshots freeze the exact cost-code basis, variance, earned-value signal, and projected margin behind approval; approval fails atomically when any source changes and creates no spend, export, payment, or external commitment. Finance handoff preparation also requires this approved cost basis and fully reviewed evidence, embeds the cost-code forecast in the package, and rejects approval when that exact source hash is no longer current.
-- Billing milestones retain the staged net value, VAT rate, planned issue date, payment date, and approval decision. Active milestones cannot exceed the job's retained contract value. An approved milestone can source exactly one invoice at the retained values; rejecting that invoice releases the milestone for correction without losing its history.
-- The durable autonomous scheduler is opt-in. It uses an atomic compare-and-swap database lease so concurrent hosted replicas cannot claim the same due cycle. It only creates ledger drafts, checks, reminders, and approval records; external commitments remain blocked.
-- The owner can activate a durable, audited autonomous-work safety stop from Operations. Suspension blocks scheduler claims, applied autonomous cycles, and command-plan application with `automation_suspended`, while dry-run diagnosis and direct human-authored ledger work remain available. This is an application control, not a physical emergency or site Stop Work system.
-- Owners can inspect the prioritized command plan in Operations and apply exact safe-draft action IDs. Office operators can review the queue but cannot apply command-plan automation or request a scheduler run.
-- Manual dashboard and direct API cycles use the same persisted scheduler lease as background execution. Invalid candidates, such as a budget draft without a positive estimate or contract value, are retained as blocked results without aborting other safe work.
-- Evidence uploads accept JPEG, PNG, WebP, PDF and DOCX only, validate MIME, filename and binary signature, enforce bounded request sizes, and are never exposed as a public static directory.
-- Governed SDS revisions require a checksum-bound PDF owned by the job, retained manufacturer and product identity, issue and expiry dates, hazard classes, PPE, and emergency controls. Approval revalidates the immutable source and makes exactly one product revision current; replacements explicitly and atomically supersede the prior current revision. Pre-task plans reject superseded, expired, unapproved, or integrity-invalid SDS records. Autonomous review creates only an idempotent internal task and never infers supplier verification or current status.
-- Governed drawing revisions require a checksum-bound job-owned PDF, sheet and revision identity, issue purpose, exact replay key, immutable source snapshot, and explicit current-sheet supersession. Approval revalidates every retained hash before field publication, while current drawings can enter the existing transmittal and recipient-acknowledgment workflow. Autonomous review creates only an idempotent internal task and never infers design acceptance, field receipt, or external delivery.
-- Field evidence retries carry a stable `Idempotency-Key`. Every processing attempt owns a unique durable lease, so an expired uploader cannot complete or release its replacement's receipt. Completed responses are retained in the ledger for 24 hours, exact retries replay without storing another object, and changed payloads using the same key are rejected.
-- Daily site logs retain the field report, scoped worker time card, and safety state in one transaction. A stable entry key makes an exact retry replay-safe and rejects changed content; any child-record failure rolls back the report, approval, time, safety, and audit writes together.
-- Site attendance is a separate assignment-scoped operational ledger. Check-in requires approved orientation-backed site access, check-in and check-out retries use exact fingerprints, and the labor board identifies stale open sessions. Corrections are immutable approval-backed adjustments over the raw times. Attendance is explicitly not payroll, a statutory register, or location tracking; autonomy may create one internal review task but cannot fabricate or close presence.
-- Weekly timesheets freeze retained worker time logs into Monday-to-Sunday, source-current approval snapshots. Daily totals above 24 hours block review; missing source references, long days, open attendance, and material attendance variance remain visible exceptions. Approved revisions supersede without overwriting history. A SHA-256 protected CSV operator handoff is available only when every worker with submitted time has a current approved week; checksum or snapshot drift blocks replay. Attendance is advisory only: it never creates payable hours, and neither approval nor export executes payroll or contacts a provider.
-- Workforce qualifications retain immutable, approval-backed credential revisions for VCA, GPI, BHV, equipment, electrical, scaffolding, asbestos, driving, and other evidence. Job requirements can target all assigned workers or one normalized role. Missing, expired, pending, or integrity-invalid mandatory evidence blocks active assignment approval, dispatch readiness, site-access clearance, and attendance. Removing a requirement is itself approval-gated, and autonomous cycles may create internal review tasks but never invent, issue, renew, or externally verify a certificate.
-- Workforce availability retains time-bounded leave, training, external commitment, and other operational absence periods. Overlaps block schedule recommendations, assignment approval, and dispatch; pending cancellation continues blocking until an approver resolves it. Records intentionally exclude diagnosis, illness, HR case, payroll entitlement, and geolocation data, and autonomous cycles create internal review tasks only.
-- Job tasks are retained operational records with open, in-progress, blocked, completed, and cancelled states. Completion, blocking, and cancellation require outcome evidence. Field workers can start, block, or complete only unassigned tasks or tasks assigned to their scoped worker identity; responses remain field-projected and cannot expose finance, client contact, approval, or audit internals.
-- Active tasks retain elapsed-hour duration and finish-to-start dependencies. The directed graph rejects cycles and calculates earliest/latest dates, total float, critical tasks, and a 14-day look-ahead. An internal schedule baseline is an immutable checksummed snapshot behind owner approval; task or dependency changes make the approved baseline visibly stale. This baseline never commits a date to a client or crew, which remains a separate schedule-commitment approval.
-- The job workspace exposes direct RFI, submittal, and controlled-document registers. Controlled document numbers and revisions are unique per job. A replacement remains a non-current candidate until owner approval atomically promotes it and supersedes the prior approved revision; both versions and their audit evidence remain retained. Overdue RFIs and submitted packages can produce deterministic approval-gated internal follow-up drafts, but automation cannot answer the RFI, approve the package, deliver a message, or change field reliance.
-- Approved current revisions can be grouped into a numbered document transmittal with an immutable recipient and document snapshot. Approval does not send the package; an office operator must retain real delivery evidence, and each recipient acknowledgment requires its own evidence reference. Superseded revisions fail a final current-state check before issue. Overdue receipts can create one idempotent approval-gated internal follow-up draft without sending a message or changing acknowledgment state.
-- Project meetings retain numbered agendas, attendance, minutes, decisions, and named actions. Submitted minutes are checksummed and approval-gated; approval activates each action as a linked job task, while issue remains blocked until an operator records real distribution evidence. Completed actions require evidence, unresolved actions can carry into one follow-up meeting without duplicating their task, and overdue actions can create one idempotent approval-gated internal follow-up draft without sending it or changing action state.
-- Field attendance, evidence, progress updates, daily site logs, material, expense, and environmental records, equipment custody, inspection checklists, observations, and incidents use a bounded IndexedDB outbox when connectivity fails. Drafts are bound to the current operator role and scoped worker, so another session cannot replay them; foreign-scope drafts remain quarantined. Scope-less drafts from the earlier local-only outbox are adopted only by the unauthenticated local owner. Stable entry keys make every supported operation exact-replay safe, changed content is rejected, and domain, approval, job-state, and audit writes commit or roll back together.
-- Unfinished central operator and client-portal forms recover after a reload within the same browser tab. Recovery is scoped to the current operator or a one-way portal-token fingerprint, expires after 12 hours, is bounded to 128 KiB per draft and 1 MiB total, strips secret-shaped fields and files, and is cleared for the operator on sign-out. It never creates a ledger record until the user explicitly submits the form, and reopening full job workspaces remains an explicit navigation action.
-- Installation-QC templates add task, active assignment, assigned worker, work location, stage, check/witness/hold point, current reference basis, acceptance criteria, evidence, measurement, and witness identity to that checklist flow. Field capture is exact-replay safe and authenticated-worker scoped in hosted mode. Passing evidence remains pending until a different authenticated approver confirms current sources and independently closed corrective observations. Offline drafts never release a hold point, autonomous cycles can create only internal review tasks, and task completion is blocked until every linked installation control is source-current and released.
-- Production requires an unpadded, non-template operator access token of at least 32 characters. The public application shell exchanges it through the throttled sign-in endpoint for a signed, short-lived, HTTP-only, SameSite session; the access key is never stored in browser storage. Failed sign-ins are counted by an HMAC-derived client key in the active SQLite or PostgreSQL ledger, so the limit survives restarts and coordinates hosted replicas without retaining the client address; successful authentication clears that client's failure window. General API quotas use atomic ledger counters in a bounded HMAC bucket space, preventing restarts, replica scaling, or address churn from bypassing the configured control or growing persistent state without limit. Browser sessions are retained by one-way id hash in the same ledger, so logout revokes the current cookie across restarts and hosted replicas. Cookie-authenticated mutations require an allowed same-origin `Origin` header, token rotation invalidates existing sessions, and bearer/API-key/Basic authentication remains available for controlled integrations. API responses default to `Cache-Control: no-store`, covering authenticated ledger data, token-scoped client portal data, readiness responses, and errors before authentication; only explicitly non-sensitive routes such as the framework catalog opt into a bounded private cache. The React client portal remains token-scoped and cannot make a direct consequential commitment. Client messages are retained as inbound records, and selection responses become internal approval requests before the ledger records a confirmed choice or requested change. The portal uses the same external Vite assets and strict CSP as the operator application.
-- Production keeps at least one strong bootstrap owner in `CONTRACTOR_AI_AUTH_TOKEN` or `CONTRACTOR_AI_ROLE_TOKENS`, then owners can add named owner, approver, office operator, and field worker access from Operations without editing environment files. Use `{"operators":[{"id":"office-utrecht","name":"Utrecht office","role":"office_operator","token":"..."}]}` for deployment-controlled principals; they remain redacted and immutable in the UI. Managed keys are generated by the server, shown once, retained only as hashes, and immediately revoke active sessions when rotated or deactivated. Every field-worker principal must be scoped with a ledger `workerId` or explicit `jobIds`; its readable job list, attendance, evidence retrieval, uploads, progress, daily reports, incident, safety, time updates, and its own expense receipts are limited to that scope. Attendance mutations additionally require a stable `workerId` identity. Field responses omit rates, estimates, contracts, margins, quotes, other workers' expenses, invoices, payments, client contacts and communications, portal access, approval details, fingerprints, and audit internals. Approvers resolve gates; only owners can run maintenance and governance actions.
+## API contract
 
-## Verification
+The API is JSON unless a route streams evidence or a governed package. Errors use:
+
+```json
+{
+  "error": {
+    "code": "stable_machine_code",
+    "message": "Human-readable explanation",
+    "requestId": "request-correlation-id"
+  }
+}
+```
+
+| Namespace | Purpose |
+| --- | --- |
+| `/api/ledger/*` | Authoritative opportunities, jobs, records, approvals, audit, and workflow actions |
+| `/api/operations/*` | Owner diagnostics, backup, export, restore validation, team access, HAI, QA archive, and automation control |
+| `/api/auth/login`, `/api/auth/logout`, `/api/session` | JSON-only sign-in, same-origin logout, and current session |
+| `/api/client-portal/*` | Scoped client view and responses using `Authorization: Bearer <portal-token>` |
+| `/api/health/ready` | Minimal orchestration health |
+| `/api/readiness` | Authenticated detailed readiness |
+
+All API responses default to `Cache-Control: no-store`. Client portal access
+starts in the URL fragment (`client-portal.html#token=...`), which browsers do not
+send to the server. The client then sends the capability in the `Authorization`
+header. Historical token-in-path routes return `410` and cannot use the supplied
+capability.
+
+Evidence is read through authenticated
+`GET /api/ledger/documents/:id/content`; every successful download is audited.
+
+Legacy namespaces such as `/api/jobs`, `/api/workers`, `/api/tools`,
+`/api/clients`, `/api/approvals`, `/api/audit`, `/api/communication`,
+`/api/weather`, `/api/schedule`, `/api/ai/chat`, `/api/upload`, and test
+notification routes return explicit `410` migration responses.
+
+See [API usage audit](docs/API_USAGE_AUDIT.md).
+
+## Security and privacy
+
+- Loopback-only credential-free operation and request-`Host` validation.
+- Production and hosted authentication that fails closed.
+- Named roles, field job scope, and server-bound audit identity.
+- Trusted-origin, Fetch Metadata, and JSON-only authentication mutations.
+- Exact CORS and explicit ingress proxy trust.
+- Durable, bounded, HMAC-bucketed API and login rate limits without retaining
+  source addresses.
+- Request, multipart, field, file, and evidence-storage quotas.
+- CSP, HSTS in production, frame denial, MIME-sniffing prevention, and no inline
+  event handlers.
+- Private evidence with checksum verification on read.
+- One transactional SHA-256 audit-chain successor per business mutation.
+- Source-current approvals and immutable package checksums.
+- Replay protection, idempotency, and durable lease ownership.
+- Minimized owner support bundles.
+- No public evidence serving or bearer secrets in request paths.
+
+Likely personal data includes client details, worker assignment/attendance,
+portal activity, evidence metadata, and uploaded files. The software provides
+controls; it does not by itself establish a lawful basis, retention schedule,
+DPA, DPIA, works-council approval, or GDPR/AVG compliance.
+
+Read [Security and privacy](docs/SECURITY.md),
+[Privacy rights operations](docs/PRIVACY_OPERATIONS.md), and
+[Accessibility](docs/ACCESSIBILITY.md).
+
+## EU-hosted production
+
+Hosted mode never falls back to SQLite or local evidence. Startup requires:
+
+- `NODE_ENV=production` and `CONTRACTOR_AI_RUNTIME_MODE=hosted`;
+- an HTTPS public origin and exact CORS entry;
+- strong owner/role authentication and an explicit trusted ingress source;
+- an EU provider, region/residency declaration, and retained DPA reference;
+- managed PostgreSQL with explicit `sslmode=verify-full` and backup/PITR;
+- private HTTPS S3-compatible storage in an EU region;
+- a bounded object PUT/GET/DELETE verification;
+- object versioning, quota, backup-policy, and retention-policy references;
+- valid migrations, audit integrity, and runtime readiness.
+
+Invalid database TLS or object-storage transport is rejected before an adapter
+can contact that endpoint.
+
+```powershell
+Copy-Item .env.hosted.example .env.hosted
+# Replace every placeholder and retain the provider/DPA/recovery evidence.
+docker compose --env-file .env.hosted -f docker-compose.hosted.yml up --build
+```
+
+Hosted Compose does not provision PostgreSQL or object storage. It runs as a
+non-root user with a read-only filesystem, dropped capabilities, disabled
+privilege escalation, and a loopback-published port. Use a restricted EU-hosted
+HTTPS ingress in front of it.
+
+### Local-to-hosted migration
+
+1. Create, verify, and download a signed local backup and readable export.
+2. Stop local and hosted runtimes.
+3. Configure a new, empty PostgreSQL database and private object-store prefix.
+4. Run:
+
+```powershell
+npm run migrate:hosted -- --backup-dir <verified-backup-directory>
+```
+
+Migration verifies the signed source, locks the target, copies tables in
+dependency order, uploads and reads back evidence, rewrites storage references,
+rebuilds the destination audit chain, invalidates sessions and rate limits,
+deactivates managed accounts, and records a receipt. Failure before commit rolls
+back rows and removes uploaded objects.
+
+Do not retire the local package until provider backups, PITR, object versioning,
+and a restore exercise have been proven. See [EU hosting](docs/EU_HOSTING.md).
+
+## Development workflow
+
+| Command | Purpose |
+| --- | --- |
+| `npm start` / `npm run serve` | Run the Node runtime and built UI |
+| `npm run dev:api` | Run the development API |
+| `npm run dev` | Run Vite with API proxy |
+| `npm run build` | Build the production React bundle |
+| `npm run preview` | Preview the Vite bundle |
+| `npm run lint` | Run ESLint |
+| `npm run verify:release` | Verify runtime, routes, migrations, and release policies |
+| `npm run verify:hai-contract` | Verify the read-only HAI contract |
+| `npm test` | Run Node unit and integration tests |
+| `npm run test:frontend` | Run Vitest/React tests |
+| `npm run test:browser` | Run managed Playwright workflows |
+| `npm run test:container` | Verify the hardened production container |
+| `npm run test:windows-package` | Smoke-test the Windows package |
+| `npm run test:performance` | Run the smoke ledger benchmark |
+| `npm run benchmark:ledger` | Run the production-scale benchmark |
+| `npm run verify:bundle` | Enforce frontend bundle budgets |
+| `npm run doctor -- --url ... --token ...` | Query minimized readiness/support state |
+| `npm run package:windows` | Build the portable Windows distribution |
+| `npm run start:standalone` | Start through the standalone launcher |
+| `npm run start:tunnel` | Start the verified authenticated ngrok lifecycle |
+| `npm run export:hai` | Atomically export the read-only HAI feed |
+| `npm run restore:local -- ...` | Restore a stopped local runtime |
+| `npm run migrate:hosted -- ...` | Migrate a signed local package to hosted mode |
+
+Use `npm ci`, not `npm install`, for reproducible CI or release verification.
+
+Implementation rules:
+
+- Keep business invariants in the transaction that changes state.
+- Treat bodies, uploads, imports, receipts, and proxy headers as untrusted.
+- Bind actor identity from authentication, never submitted JSON.
+- Revalidate source hashes when approvals resolve.
+- Preserve records through revisions, compensating actions, or archive.
+- Add idempotency to retryable field, provider, and autonomous work.
+- Never claim sent, paid, certified, or verified without matching evidence.
+
+## Verification and CI
+
+GitHub Actions runs on pushes to `main`, pull requests, and manual dispatch.
+The Linux job performs Node.js 22 installation, TLS PostgreSQL 16 setup, release
+and HAI contracts, lint, build, bundle budgets, frontend and Node tests,
+production-scale benchmark, container verification, and Playwright. The Windows
+job builds and smoke-tests `ContractorAI-windows-x64.zip`.
+
+The CI PostgreSQL target uses `sslmode=verify-full` and verifies `SHOW ssl`, so
+hosted tests cannot silently pass over plaintext or unverified encryption.
 
 ```powershell
 npm run verify:release
+npm run verify:hai-contract
 npm run lint
 npm run build
 npm run verify:bundle
 npm run test:frontend
 npm test
-npm run benchmark:ledger
 npm run test:container
 npm run test:browser
 ```
 
-The browser gate includes a pinned axe scan for selected WCAG 2.0/2.1 A/AA and
-WCAG 2.2 AA rules across the production sign-in, primary workspaces, representative
-dialogs, mobile navigation, and mobile/desktop client portal. See
-[`docs/ACCESSIBILITY.md`](docs/ACCESSIBILITY.md) for scope and human acceptance
-that remains required.
+Provider-live delivery, managed EU recovery, legal/DPA review, and production
+restore exercises remain separate acceptance gates.
 
-GitHub Actions runs the same checks for every push and pull request. A separate Windows job builds and uploads the portable Windows x64 package with Node.js 22. Its PostgreSQL service enables TLS with a short-lived trusted test certificate, verifies `SHOW ssl`, and supplies `sslmode=verify-full`, so hosted-path tests cannot silently fall back to plaintext or unauthenticated encryption. The container gate builds the exact production image, starts it with a read-only root filesystem, dropped capabilities, disabled privilege escalation, loopback-only publishing, and a durable data volume, then proves readiness, authentication, non-root execution, Docker health, restart persistence, and graceful shutdown. Every `.env*` file is excluded from the Docker build context.
+## Repository map
 
-The ledger benchmark creates a disposable deterministic 63,500-row SQLite
-fixture, checks search and aggregate correctness beyond 500 rows, measures hot
-read/write paths, verifies the 25,000-event audit chain, and fails when retained
-thresholds are exceeded. CI uploads its JSON report as `ledger-performance-report`.
-See `docs/PERFORMANCE_BENCHMARK.md` for profiles and interpretation.
-
-## Container and EU Hosting
-
-The local-first Docker configuration persists data to a named volume:
-
-```powershell
-docker compose up --build
+```text
+.
+|-- App.jsx / App.css                 Operator application
+|-- ClientPortal.jsx / .css           Scoped client application
+|-- components/                       Domain workspaces and controls
+|-- server.js                         Express runtime and API boundary
+|-- operating-ledger.js               Ledger, migrations, business rules
+|-- evidence-storage.js               Local/S3 private evidence adapter
+|-- postgres-sync-*.js                PostgreSQL adapter and worker
+|-- framework-catalog.js              Framework validation and playbooks
+|-- contractor-framework-catalog.json Maintained framework data
+|-- hai-connector.js                  Read-only HAI projection
+|-- backup-manifest.js                Signed backup contract
+|-- runtime-lock.js                   Local runtime/restore exclusion
+|-- scripts/                          Release, migration, package, and diagnostics
+|-- tests/                            Node unit and integration contracts
+|-- frontend-tests/                   Vitest React contracts
+|-- e2e/                              Playwright workflows
+|-- docs/                             Architecture, operation, security, evidence
+|-- Dockerfile                        Multi-stage non-root production image
+|-- docker-compose*.yml               Local and hosted container modes
+|-- .github/workflows/verify.yml      Linux and Windows release gates
 ```
 
-The local Compose stack starts without an `.env` file and persists its ledger and evidence in the `contractor-ai-data` volume. Add `.env` only when you need to override the local defaults.
+Generated bundles, runtime databases, evidence, backups, support bundles,
+benchmark artifacts, and packaged releases should not be committed.
 
-Hosted operation is fail-closed until EU-region infrastructure is configured. It requires an HTTPS public origin, authentication, an explicit trusted ingress proxy address, durable EU object storage, a reachable managed PostgreSQL database, retained DPA/provider-region references, PostgreSQL backups, object versioning, and a recovery-policy reference. See [EU hosting guidance](docs/EU_HOSTING.md).
+## Documentation index
 
-Evidence storage uses a private local filesystem in local mode and a signed S3-compatible adapter when configured for an EU host. Retained object references are restricted to the configured bucket and `CONTRACTOR_AI_S3_PREFIX`; sibling tenant prefixes and traversal-style references fail before an object request is signed. Readiness proves bounded PUT, GET, and DELETE access with a unique marker so health checks do not accumulate retained objects. Files remain available only through authenticated ledger retrieval. Hosted mode uses the same ledger contract through the PostgreSQL adapter and refuses startup if the target cannot be connected. PostgreSQL schema creation, migrations, and legacy seeding run under one advisory lock, so rolling deployments can start multiple replicas without applying a migration twice. Local migration and seeding checks execute inside SQLite write transactions.
+| Document | Audience and purpose |
+| --- | --- |
+| [Operator runbook](docs/OPERATOR_RUNBOOK.md) | Startup, daily checks, diagnostics, safety stop, recovery, and incidents |
+| [Windows standalone](docs/WINDOWS_STANDALONE.md) | Portable Windows installation and retained data |
+| [ngrok operation](docs/NGROK.md) | Verified temporary remote-access lifecycle |
+| [EU hosting](docs/EU_HOSTING.md) | Hosted requirements, migration, recovery, and acceptance |
+| [Security](docs/SECURITY.md) | Trust boundaries, controls, privacy, and incident response |
+| [Privacy operations](docs/PRIVACY_OPERATIONS.md) | Data-subject request handling |
+| [Accessibility](docs/ACCESSIBILITY.md) | Keyboard, focus, responsive, and automated accessibility contract |
+| [HAI connector](docs/HAI_CONNECTOR.md) | Read-only feed setup and authority boundary |
+| [Acceptance tests](docs/ACCEPTANCE_TESTS.md) | Required release outcomes and evidence |
+| [Final verification report](docs/FINAL_VERIFICATION_REPORT.md) | Revision-specific evidence; check its date/SHA |
+| [Technical audit](docs/TECHNICAL_AUDIT.md) | Runtime, architecture, debt, and stabilization evidence |
+| [Goal completion matrix](docs/GOAL_COMPLETION_MATRIX.md) | Requirement-to-evidence traceability |
+| [Critical path](docs/CRITICAL_PATH.md) | Release order and external gates |
+| [Task graph](docs/TASK_GRAPH.md) | Delivery dependencies |
+| [API usage audit](docs/API_USAGE_AUDIT.md) | Authoritative and retired routes |
+| [UI action audit](docs/UI_ACTION_AUDIT.md) | Interface action wiring |
+| [Archive port audit](docs/ARCHIVE_PORT_AUDIT.md) | Legacy archive port/exclusion decisions |
+| [Performance benchmark](docs/PERFORMANCE_BENCHMARK.md) | Dataset, thresholds, and interpretation |
+| [Codex checkpoints](docs/CODEX_CHECKPOINTS.md) | Historical checkpoints, not current release proof |
+| [Codex worklog](docs/CODEX_WORKLOG.md) | Historical notes, not current release proof |
 
-To migrate a stopped, verified local backup into an empty hosted PostgreSQL database and private object store, configure the hosted environment variables and run:
+## Current boundaries
 
-```powershell
-npm run migrate:hosted -- --backup-id <backup-id> --confirm MIGRATE_<backup-id>
-```
+The repository provides a working local product and a tested hosted application
+path. These items require a real organization or provider before production:
 
-The command accepts authenticated backup manifest v3 packages, requires the matching backup signing key and PostgreSQL TLS, refuses a non-empty target, migrates every ledger table in foreign-key order, uploads and reads back every evidence object, rewrites retained storage references, deactivates migrated managed operator keys, and records a checksummed migration receipt. Database and object changes are rolled back when pre-commit verification fails. Historical unsigned v2 migration packages require the explicit `--allow-legacy-unsigned` compatibility flag. The owner issues new hosted keys only after readiness is verified. The operational JSON export is an operator-readable validation artifact, not a complete hosted import format.
+- select an EU provider and retain DPA/subprocessor evidence;
+- provision PostgreSQL, object storage, backups, PITR, versioning, monitoring,
+  ingress, TLS, and incident contacts;
+- perform and document a managed restore;
+- configure and acceptance-test each messaging, accounting, Peppol, banking,
+  calendar, mapping, weather, AI, or other selected provider;
+- validate Dutch/EU tax, labour, construction, safety, privacy, retention, and
+  contract requirements with qualified professionals;
+- define physical emergency and Stop Work procedures;
+- train operators and decide which frameworks they are qualified to use.
 
-Hosted `POST /api/operations/backup`, local backup listing/download, and backup-first QA reset return `409 provider_recovery_required`. An application container cannot produce a complete backup of managed PostgreSQL plus private object storage. Use the declared provider recovery policy and retain its evidence outside Contractor.AI.
+No fake credential, mock provider success, or repository-only test closes those
+gates. Until a provider is explicitly configured and verified, Contractor.AI is
+an internal evidence, drafting, approval, and handoff system with zero external
+commitments.
 
-## Authoritative API
+## License
 
-The supported surface is `/api/ledger/*`, including opportunities, intake, jobs, approvals, dispatch, workforce, field assurance, finance, client success and autonomous cycles. Operational maintenance endpoints are:
-
-- `GET /api/session` returns the current role and capability boundary without exposing token material. `POST /api/auth/login` exchanges a configured role key for a revocable HTTP-only browser session; `POST /api/auth/logout` revokes it in the ledger and clears the cookie.
-- `GET /api/ledger/opportunities` returns the retained preconstruction pipeline and weighted forecast. Owner and office operators can `POST /api/ledger/opportunities`, `PATCH /api/ledger/opportunities/:id`, retain or complete internal activities under `/activities`, and idempotently `POST /api/ledger/opportunities/:id/convert`. Conversion creates one linked job without assigning crew or making an external commitment. A linked opportunity becomes `won` only when a separate quote-acceptance approval verifies dated client evidence; a manual win is rejected and a loss requires a retained reason. Approvers have read-only pipeline access and field workers have none.
-- `GET /api/ledger/market-fit` returns the active and historical policy, current evaluations, retained assessments, stale-evidence state, and pipeline summary. Owner-only `POST /api/ledger/market-fit/profiles` creates a replay-safe policy revision behind `market_fit_policy_revision` approval. `GET /api/ledger/opportunities/:id/market-fit` explains every criterion; `POST /api/ledger/opportunities/:id/market-fit-assessments` freezes the current source hash and result. Autonomous cycles may retain the assessment and open one internal review activity, but cannot make the operator's bid/no-bid decision.
-- `GET /api/ledger/bid-decisions` returns the versioned weighted scorecard, open-pursuit evaluations, approved and pending decisions, stale-evidence state, and pipeline summary. Owner-only `POST /api/ledger/bid-decisions/policies` requests an approval-gated policy revision. `POST /api/ledger/opportunities/:id/bid-decisions` freezes operator ratings, gate evidence, retained market-fit evidence, rationale, and any explicit recommendation override behind separate approval. Approval atomically rechecks the current opportunity, fit assessment, policy, source hash, and snapshot. Neither bid nor no-bid changes opportunity stage, creates a job or bid package, sends a message, promises a date, or commits spend; autonomous cycles can only open one internal review activity.
-- `GET /api/ledger/bid-packages` returns retained tender packages, return comparisons, preferred-bidder decisions, and linked commitment integrity. Owner and office operators can retain packages and returns, request preferred-bidder approval, and `POST /api/ledger/bid-packages/:id/commitment` after opportunity conversion. The commitment endpoint is exact-replay safe and creates one approval-gated purchase order from the frozen selected return; approvers resolve the gate, while field workers have no preconstruction or commercial access.
-- `POST /api/ledger/jobs/:id/purchase-orders/:purchaseOrderId/issue-package` requires an approved, source-current purchase order, complete contractor identity, compliant supplier, valid recipient, and exact line total. It allocates a durable yearly `PO` number and idempotently retains checksum-protected HTML plus generic OASIS UBL 2.1 Order evidence. Preparation creates a separate communication approval; `POST /api/ledger/communications/:id/delivery-receipt` then requires an allowlisted integration and provider evidence before the order becomes an external commitment. The Finance dashboard exposes the same preparation, approval, download, and receipt sequence for standalone orders.
-- `GET /api/ledger/schedule` returns the active portfolio look-ahead with current task windows, critical and overdue work, approved or pending schedule baselines, stale-plan evidence, and revalidated crew/equipment conflicts. Filters cover risk, conflict, overdue, unscheduled, baseline, look-ahead, search, and a bounded 1-180 day horizon. One invalid job plan is isolated as an explicit row instead of failing the portfolio response. Owner and office operators can coordinate through the linked job workspace, approvers have read-only portfolio access, and field workers remain limited to their assigned job schedules.
-- `GET /api/ledger/clients` returns the retained client directory with contact, basic invoice, and Peppol/UBL buyer-profile readiness plus linked job, opportunity, contract-value, and receivable context. Owner and office operators can create and update validated client identities, while approvers have read-only access and field workers have none. Duplicate email, company, registration, and electronic-address identities are rejected. Dutch KVK records can derive the `0106` buyer endpoint used by future invoice drafts; existing commercial snapshots remain immutable and no client mutation sends a message or creates work.
-- `GET /api/ledger/command-plan` previews prioritized ledger work; owner-only `POST /api/ledger/command-plan` applies selected safe action IDs without external commitment.
-- `GET /api/ledger/frameworks/catalog` returns the bounded, cacheable 23-family framework catalog. Existing nested family guidance remains compatible; the dashboard requests `compact_families=true` to avoid repeating it on all 671 rows while retaining the full family playbooks once in the response. `GET /api/ledger/frameworks` returns database-filtered implementation records, status summaries, family coverage, and due reviews. Owner and office operators create and revise records through `POST /api/ledger/frameworks` and `PATCH /api/ledger/frameworks/:implementationId`; approvers have read-only access and field workers have none. Every revision is replay-safe, checksum-protected, concurrency-guarded, exportable, and backup-verified. Due reviews enter the internal command queue and read-only HAI feed but cannot execute or make an external commitment.
-- Owner-only `POST /api/ledger/autonomous-cycle` preserves dry-run inspection while routing every bounded mutating request through the durable scheduler lease; callers can scope work with `actionTypes`, `jobIds`, and `maxActions`.
-- Overdue open opportunities enter the command queue as `draft_opportunity_follow_up`. An autonomous cycle can retain one idempotent internal follow-up draft per opportunity/due timestamp, but cannot send it or create any external commitment.
-- `GET /api/ledger/scheduler` exposes the durable lease and last outcome; owner-only `POST /api/ledger/scheduler/run` claims and completes a due cycle idempotently.
-- `POST /api/ledger/weather/assess`
-- `POST /api/ledger/schedule/recommend`
-- `POST /api/ledger/schedule/prepare-dispatch`
-- `POST /api/ledger/schedule/request-approval`
-- `POST /api/ledger/jobs/:id/field-assurance-pack`
-- `POST /api/ledger/jobs/:id/progress` records an atomic progress and job-state update. Optional `entryKey` retries return the original update and reject changed content.
-- `POST /api/ledger/jobs/:id/tasks` creates a retained internal work item and can atomically link an optional predecessor. `PATCH /api/ledger/jobs/:id/tasks/:taskId/schedule` updates internal duration or planned dates without creating an external commitment. `PATCH /api/ledger/jobs/:id/lifecycle/task/:recordId` starts, blocks, completes, reopens, or cancels it with an audited transition; completion, blocking, and cancellation require retained outcome evidence.
-- `POST /api/ledger/jobs/:id/task-dependencies` retains a finish-to-start link after same-job and cycle validation; `POST /api/ledger/jobs/:id/task-dependencies/:dependencyId/cancel` removes it from the current graph while preserving history. `POST /api/ledger/jobs/:id/work-plan/calculate` returns the current critical-path and look-ahead calculation. `POST /api/ledger/jobs/:id/schedule-baselines` freezes that exact plan behind an `internal_schedule_baseline` approval; stale or checksum-invalid snapshots cannot be approved.
-- `GET /api/ledger/organization` reports retained business identity and commercial-issue readiness. Owner-only `PUT /api/ledger/organization` updates legal, contact, registration, VAT, electronic-address, postal, banking, and default commercial terms.
-- `POST /api/ledger/jobs/:id/quote` retains a server-calculated estimate with up to 50 validated line items and creates its internal issue approval. `POST /api/ledger/jobs/:id/quotes/:quoteId/issue-package` requires that approval plus a complete business identity, then idempotently retains an immutable package and approval-gated delivery draft. Authenticated `GET /api/ledger/documents/:id/issue-package` verifies the checksum before returning the print-ready attachment. `POST /api/ledger/jobs/:id/quotes/:quoteId/acceptance` requires an approved quote plus dated client evidence and creates a separate acceptance-verification approval; only resolution establishes the accepted net contract baseline.
-- `POST /api/ledger/jobs/:id/takeoffs` retains an internal quantity sheet. Item routes under `/takeoffs/:takeoffId/items` recalculate measurement quantities and commercial totals on every change. `POST /api/ledger/jobs/:id/takeoffs/:takeoffId/convert` atomically seals the measured scope and creates one approval-gated estimate; converted sheets are immutable and replay returns the same estimate.
-- `POST /api/ledger/jobs/:id/invoices` derives VAT and gross totals from the retained net amount and rate, rejects caller mismatches, and creates an internal issue approval. `POST /api/ledger/jobs/:id/invoices/:invoiceId/issue-package` allocates a durable yearly invoice number and idempotently retains a checksum-protected HTML invoice plus an optional Peppol BIS Billing 3.0-oriented UBL 2.1 export when its seller, buyer, reference, address, endpoint, VAT, line, and payment readiness checks pass. Package preparation creates a separate delivery approval and does not submit to Peppol. The invoice becomes a receivable only after an allowlisted delivery receipt.
-- `POST /api/ledger/jobs/:id/billing-milestones` retains a contract-bounded staged billing record and creates a `billing_schedule` approval. Approval makes the milestone available to one invoice draft; the invoice amount, VAT, currency, description, and due date are then derived from the milestone and cannot be overridden. Autonomous cycles create only the internal milestone first and wait for approval before drafting its invoice.
-- `POST /api/ledger/jobs/:id/invoices/:invoiceId/credit-notes` retains a server-calculated net, VAT, and gross correction against an immutable issued invoice. It requires a reason, exact currency and source VAT rate, reserves the available receivable balance immediately, and creates an internal issue approval without changing the invoice total. `POST /api/ledger/jobs/:id/credit-notes/:creditNoteId/issue-package` requires that approval, rechecks concurrent reservations, allocates a durable yearly `CRN` number, and idempotently retains checksum-protected HTML plus optional Peppol BIS Billing 3.0-oriented UBL CreditNote evidence that references the original invoice. Package preparation adjusts the receivable; delivery remains a separate approval and verified-integration step.
-- `GET /api/ledger/jobs/:id/handover-readiness` reports the exact completion, contractor identity, client, field evidence, quality, safety, permit, inspection, incident, observation, and punch requirements for a Wkb-style handover dossier. `POST /api/ledger/jobs/:id/handover-packages` idempotently freezes the current evidence manifest, audit-chain head, evidence digest, package digest, and print-ready HTML behind a separate client-delivery approval. Authenticated `GET /api/ledger/documents/:id/issue-package` verifies both retained checksums before download. Evidence changes make an older package stale and block its approval or delivery. The dossier is evidence-oriented and does not claim statutory Wkb certification.
-- `GET /api/ledger/installation-qc` and `GET /api/ledger/jobs/:id/installation-qc` expose governed installation controls with effective source state, corrective blockers, and task-completion readiness. Office operators schedule a control through `POST /api/ledger/jobs/:id/inspection-checklists`; only its assigned worker can submit retained field evidence through the checklist-submission route in authenticated mode. Approval revalidates source and evidence integrity before release. The compatibility inspection routes remain available for non-governed checklists.
-- `POST /api/ledger/jobs/:id/invoices/:invoiceId/payments` retains a received-payment or write-off request against one exact invoice after its immutable issue package exists. The ledger reserves pending amounts, rejects ambiguous invoice matching, currency mismatches, overpayments, and normalized duplicate references, and leaves the invoice unchanged until approval. Approval atomically records the payment evidence and moves the invoice to `partially_paid`, `paid`, or `settled`; rejection restores an existing collection record without consuming the reference or balance. This is reconciliation evidence only and never moves funds.
-- `POST /api/ledger/jobs/:id/supplier-invoices` retains an accounts-payable invoice behind approval, checks purchase-order, supplier, currency, net amount, delivery evidence, and partner compliance, and requires an explicit override reason for exceptions. `POST /api/ledger/jobs/:id/supplier-invoices/:supplierInvoiceId/payments` retains approval-gated external payment evidence, blocks duplicate references and overpayment, and reconciles partial or final settlement without moving funds.
-- `GET /api/ledger/jobs/:id/cost-forecast` returns the current source-linked cost-code forecast with approved actuals separated from unreviewed incurred evidence, issued commitments, authorized-but-not-issued spend, cost to complete, EAC, VAC, earned value, CPI, and projected margin. Approved actuals require exact time-log lines in approved weekly timesheets, intact approved expense receipts, or approved supplier invoices. Unreviewed time, receipt, invoice, and commitment evidence remains visible and is included conservatively in EAC without becoming posted actual cost. `POST /api/ledger/jobs/:id/cost-forecast/snapshots` only accepts the current ledger date, idempotently allocates an immutable forecast number and approval, and rechecks the exact source hash before superseding the prior active snapshot. Forecast approval does not approve its underlying costs. `GET /api/ledger/jobs/:id/cost-forecast/snapshots` returns the retained forecast history, including readable v1 snapshots.
-- `GET /api/ledger/cash-flow` calculates a Monday-aligned 13-week liquidity forecast from issued client receivables, approved supplier payables, approved unbilled milestones, and replay-safe manual assumptions. It preserves month-end recurrence, warns about issued purchase commitments without payable dates, blocks mixed-currency snapshots, and exposes confidence-weighted balances. `POST /api/ledger/cash-flow/items` retains assumptions, `/items/:itemId/archive` archives them without deleting history, and `POST /api/ledger/cash-flow/snapshots` freezes an immutable approval-backed forecast. Approval rechecks the exact source hash; no route initiates a payment or creates an external commitment.
-- `GET /api/ledger/performance-scorecard` calculates twenty-three retained-data KPIs across safety, quality, delivery, customer, workforce, finance, commercial, asset, compliance, and sustainability perspectives for a selectable 4-to-52-week period with prior-period comparison. Customer evidence includes direct NPS, CSAT, and customer-effort measures alongside warranty and handover controls: NPS is promoter share minus detractor share, while CSAT and effort-ease are the share of 4-to-5 responses. Its source hash covers material metric inputs instead of unrelated ledger rows. Reporting-period measures remain reproducible; nine mutable point-in-time measures are calculated only for today's position and return `historical_state_not_retained` for past dates, where retained snapshots are authoritative. Missing evidence remains `no_data` and never passes. `POST /api/ledger/performance-scorecard/targets` retains replay-safe, versioned KPI target revisions behind approval, and `POST /api/ledger/performance-scorecard/snapshots` freezes a durable `BSC` version behind separate approval. Snapshot approval rechecks both evidence and target hashes; no route edits source records or creates external, financial, supplier, schedule, or client commitments.
-- `POST /api/ledger/jobs/:id/change-orders` retains a server-calculated scope, price, VAT, and schedule delta behind internal approval. `POST /api/ledger/jobs/:id/change-orders/:changeOrderId/issue-package` allocates a durable yearly `CO` reference and idempotently freezes the exact source basis into checksum-protected HTML plus an approval-gated client delivery draft. An allowlisted provider receipt must issue that package before `POST /api/ledger/jobs/:id/change-orders/:changeOrderId/acceptance` can retain client evidence; approval verifies the package and delivery chain before the accepted net change enters contract value.
-- `GET` and `POST /api/ledger/jobs/:id/daywork-tickets` list or retain replay-safe observed quantity evidence. Field tokens are worker-scoped and receive a privacy-minimized projection. `POST /api/ledger/jobs/:id/daywork-tickets/:ticketId/acknowledgement` retains receipt evidence behind a separate approval; `POST /api/ledger/jobs/:id/daywork-tickets/:ticketId/convert` prices every exact source line and creates one source-bound change order with its own approval gate.
-- `GET` and `POST /api/ledger/jobs/:id/nonconformances` expose the governed NCR register. Capture is replay-safe and retains the original requirement, observed condition, containment, responsibility, due date, and optional same-job evidence links without an external commitment. `POST /api/ledger/jobs/:id/nonconformances/:recordId/corrective-action` and `/closure` require separate source-current approvals; closure also requires independently verified passing evidence. Open NCRs block handover readiness, and autonomous review can create only idempotent internal follow-up tasks.
-- `GET /api/ledger/sds-sheets` and `GET /api/ledger/jobs/:id/sds-sheets` expose the governed SDS history to office roles and only current, field-safe records to assigned workers. `POST /api/ledger/jobs/:id/sds-revisions` requires a stable replay key and retained PDF upload, creates a source-bound approval request, and requires the exact current revision when replacing a product.
-- `GET /api/ledger/drawings` and `GET /api/ledger/jobs/:id/drawings` expose governed drawing history to office roles and only current, integrity-valid revisions to assigned workers. `POST /api/ledger/jobs/:id/drawing-revisions` freezes a checksum-bound revision and creates a publication approval; a replacement must identify the exact current drawing for that sheet.
-- `POST /api/ledger/jobs/:id/daily-logs` atomically records one approval-gated field report, server-bound worker time card, and daily safety check. `entryKey` retries are replay-safe and changed content is rejected.
-- `POST /api/ledger/jobs/:id/observations` and `POST /api/ledger/jobs/:id/incidents` retain manual field-risk reports. Optional evidence document IDs must belong to the same job. `entryKey` retries return the original record and approval without duplication; changed content returns `409`. Incident review and high-risk/terminal observation changes remain human-gated, and no submission sends an external notification, clears work, or performs a statutory filing.
-- `POST /api/ledger/jobs/:id/punch-items` accepts assigned field and office capture with optional same-job evidence. `entryKey` retries are exact and duplicate-safe; resolution and client visibility remain approval-gated. Warranty claims and aftercare follow-ups share the job closeout register, but they cannot admit liability, authorize spend, book work, or contact the client.
-- `GET /api/ledger/client-feedback` and `POST /api/ledger/jobs/:id/client-feedback` expose office-controlled, replay-safe NPS, CSAT, and customer-effort evidence. Every row carries an immutable snapshot, entry fingerprint, evidence reference, explicit follow-up/testimonial consent, and integrity diagnostics. Low scores can create one deterministic internal recovery item; automation cannot contact the client, request a public review or referral, book work, or authorize spend.
-- `POST /api/ledger/jobs/:id/worker-instructions` retains a draft against the current `assignmentId` and `workerId`; `PATCH /api/ledger/jobs/:id/lifecycle/worker_instruction/:recordId` requires review evidence and approval before publication can satisfy dispatch readiness.
-- `POST /api/ledger/jobs/:id/orientations` retains assignment-scoped induction evidence; `PATCH /api/ledger/jobs/:id/lifecycle/orientation/:recordId` requires a verification reference and approval before the orientation can support access.
-- `POST /api/ledger/jobs/:id/site-access` requires an orientation for the same assignment and worker; `PATCH /api/ledger/jobs/:id/lifecycle/site_access/:recordId` keeps access blocked until explicit clearance approval.
-- `POST /api/ledger/jobs/:id/assignments/:assignmentId/release` atomically releases the assignment, cancels its instructions, expires its orientations, checks out its access records, and rejects unresolved crew-evidence approvals. Those records remain visible as historical evidence but cannot satisfy replacement-crew readiness.
-- `POST /api/ledger/jobs/:id/time-logs`
-- `GET /api/ledger/timesheets?periodStart=YYYY-MM-DD` returns the weekly worker review board, retained versions, source-current state, complete-worker handoff readiness, exceptions, and handoff history. `POST /api/ledger/workers/:id/timesheets` freezes a current source snapshot behind `weekly_timesheet` approval. Only periods with current approval for every submitted worker can be packaged with `POST /api/ledger/timesheet-exports`; authenticated `GET /api/ledger/timesheet-exports/:id/content` verifies and downloads the retained CSV without executing payroll or initiating provider delivery.
-- `GET /api/ledger/qualifications` returns the credential catalog, current worker register, job requirements, and assignment readiness. `POST /api/ledger/workers/:id/credentials` retains an immutable credential revision behind `worker_credential` approval. `POST /api/ledger/jobs/:id/qualification-requirements` enforces a job/role requirement immediately; `POST /api/ledger/jobs/:id/qualification-requirements/:requirementId/retirement` keeps it active behind an approval-gated removal decision.
-- `GET /api/ledger/availability` returns the operational availability register, current/upcoming summaries, and assignment conflicts. `POST /api/ledger/workers/:id/availability` creates a replay-safe time-bounded block; `POST /api/ledger/workers/:id/availability/:periodId/cancellation` keeps the block active behind an approval-backed cancellation decision. Worker-scoped `GET /api/ledger/workers/:id/availability` can include retained cancellation history for office review.
-- `PATCH /api/ledger/jobs/:id/materials/:materialId/status`
-- `POST /api/ledger/jobs/:id/procurement-orders/:orderId/request-approval`
-- `GET /api/ledger/workers` lists retained crew records with availability, operational `activeAssignmentCount`, inactive-job `dormantAssignmentCount`, total `retainedAssignmentCount`, pending-retirement visibility, and a directory summary; `GET /api/ledger/workers/:id` returns one canonical record.
-- `POST /api/ledger/workers` and `PUT /api/ledger/workers/:id` retain validated identity, contact, role, region, skill, availability, and internal cost evidence without creating a schedule, payroll, or communication action.
-- `POST /api/ledger/workers/:id/retirement` creates a replay-safe approval and blocks new assignments while pending. Resolution refuses retirement while operational assignments remain and releases dormant inactive-job assignments in the same audited transaction before marking the worker retired.
-- `GET /api/ledger/tools` lists retained equipment with condition, location, operational and dormant reservation counts, pending-retirement visibility, and a directory summary.
-- `POST /api/ledger/tools` and `PUT /api/ledger/tools/:id` retain validated equipment identity, status, location, inspection, and internal reference evidence without creating a reservation, dispatch, purchase, or assignment.
-- `POST /api/ledger/tools/:id/inspections` appends internal inspection evidence, derives current/due-soon/overdue/failed readiness, and never claims statutory certification. Equipment explicitly requiring inspection cannot be reserved while evidence is missing, overdue, failed, limited, or awaiting post-maintenance reinspection.
-- `POST /api/ledger/tools/:id/maintenance` appends cost-free internal maintenance evidence without creating supplier spend or an external service commitment. Completed corrective work linked to a failed or limited inspection still requires a passing reinspection before reservation readiness is restored.
-- `GET /api/ledger/dispatch` revalidates active crew assignments, assignment-scoped instruction/orientation/access evidence, and equipment reservations against current canonical records. Released-worker evidence cannot clear a replacement worker. Missing, retiring, unavailable, conflicting, or uncleared crew and unsafe equipment block dispatch immediately; busy or traveling crew remain visible as warnings for operator confirmation.
-- `POST /api/ledger/tools/:id/retirement` creates a replay-safe approval and blocks new reservations while pending. Resolution refuses retirement while operational reservations remain and atomically releases dormant inactive-job reservations before marking the equipment retired. Owner-only `DELETE` remains a compatibility alias for the same non-destructive workflow.
-- `GET /api/ledger/trade-partners` lists retained suppliers and subcontractors with derived compliance status and expiry warnings.
-- `POST /api/ledger/trade-partners` and `PUT /api/ledger/trade-partners/:id` retain identity, registration, tax, insurance, VCA, specialty, and verification evidence.
-- `POST /api/ledger/trade-partners/:id/retirement` creates a replay-safe approval. Approval blocks new purchasing selection while preserving all partner, procurement, finance, and audit history.
-- `POST /api/ledger/jobs/:id/archive` creates a replay-safe `job_archive` approval only after existing job approvals are resolved. Approval removes the job from active workflows, makes it read-only, and revokes active client portal links without deleting any linked record or triggering an external action.
-- `POST /api/ledger/jobs/:id/restore` creates a replay-safe `job_restore` approval for an archived job. Approval restores the exact retained status and phase while preserving archive history; portal links remain revoked and require a new approval. Operational writes return `409 job_inactive_read_only` until restore, while assignment/tool release and portal revocation remain available as audited commitment-reduction actions.
-- `PATCH /api/ledger/jobs/:id/lifecycle/selection/:recordId` for approval-gated client decisions
-- `GET /api/client-portal/:token` returns the restricted project view; `POST /api/client-portal/:token/messages` records an inbound client request.
-- `POST /api/client-portal/:token/feedback` retains one project-experience response per scoped portal access. Exact retries replay safely; a second submission is rejected, and consent never triggers automatic review, referral, or follow-up communication.
-- `POST /api/client-portal/:token/selections/:selectionId/responses` validates a published option or change request, deduplicates a pending response, and creates an internal `client_selection_response` approval. Approval records the client decision but cannot change price, scope, schedule, safety state, or procurement commitments.
-- `PATCH /api/ledger/jobs/:id/lifecycle/document/:recordId` for controlled document review
-- `POST /api/ledger/jobs/:id/controlled-document-revisions` creates a uniquely numbered draft revision with a retained source reference and optional supersession link. Approval is required before it becomes current.
-- `POST /api/ledger/jobs/:id/rfis` and `POST /api/ledger/jobs/:id/submittals` retain direct project-control records; their consequential lifecycle states remain approval-gated.
-- `POST /api/ledger/jobs/:id/document-transmittals` prepares an approval-backed distribution snapshot from current controlled document and governed drawing revisions. `POST /api/ledger/jobs/:id/document-transmittals/:transmittalId/issue` records external delivery evidence without performing delivery, and `POST /api/ledger/jobs/:id/document-transmittals/:transmittalId/receipts/:receiptId/acknowledge` retains recipient-specific acknowledgment evidence.
-- `POST /api/ledger/jobs/:id/project-meetings` retains draft minutes and proposed actions. `POST /api/ledger/jobs/:id/project-meetings/:meetingId/submit` creates the immutable approval record, `/issue` records external distribution evidence, `/actions/:actionId/complete` closes both the action and linked task with evidence, and `/follow-up` carries unresolved actions into a new draft without duplicating tasks.
-- `GET /api/ledger/inspection-templates` lists the active built-in and custom checklist versions. Office operators can `POST /api/ledger/inspection-templates` to retain a reusable immutable version, then `POST /api/ledger/jobs/:id/inspection-checklists` to schedule a job-specific snapshot. Assigned field workers can replay-safely `POST /api/ledger/jobs/:id/inspections/:inspectionId/checklist-submissions`; complete item responses are frozen, failed items create linked corrective observations, and pass/fail sign-off remains approval-gated. Template changes never rewrite scheduled or submitted evidence.
-- Dispatch controls surface retained procurement orders, material requirements, site orientations, safety records, RFIs, permits, documents, submittals, and client selections directly in the Dispatch workspace. Procurement approval creates no supplier order or spend commitment; consequential actions remain approval-gated.
-- `POST /api/ledger/jobs/:id/finance-costs`
-- `GET` and `POST /api/ledger/jobs/:id/expense-receipts` list or retain governed receipt evidence. Field workers see only their own projected receipts; every new receipt requires approval before cost recognition.
-- `POST /api/ledger/jobs/:id/expense-receipts/:expenseId/reversal` requests an office-controlled compensating reversal while preserving the original receipt and recognized cost until approval.
-- `GET` and `POST /api/ledger/jobs/:id/environmental-activities` expose the scoped environmental register and retain replay-safe measured activity with factor provenance. Field workers see only their own projected records; approval is required before kg CO2e enters the recognized job total.
-- `POST /api/ledger/jobs/:id/environmental-activities/:activityId/reversal` requests an office-controlled compensating correction. `POST /api/ledger/jobs/:id/environmental-reports` freezes a decision-clean period into an approval-backed source and snapshot hash plus CSV checksum; approved content is available from `GET /api/ledger/environmental-reports/:reportId/content` without performing external submission or claiming certification.
-- `GET` and `POST /api/ledger/jobs/:id/energy-performance` expose the office-controlled BENG and energy-performance evidence register. Each record binds the declared BENG 1, BENG 2, BENG 3, and TOjuli values and limits to a checksummed adviser-issued PDF, adviser and certified-company identity, NTA 8800 version, attested software version, EP-Online reference where applicable, and an immutable approval snapshot. Completion evidence must reference the exact compliant permit/Wkb record and retain the same software version. Contractor.AI only compares retained values with retained thresholds; it does not perform an NTA 8800 calculation, certify legal compliance, register an energy label, or submit to EP-Online. See the current [RVO BENG indicators](https://www.rvo.nl/onderwerpen/wetten-en-regels-gebouwen/beng/indicatoren), [RVO EP adviser process](https://www.rvo.nl/onderwerpen/wetten-en-regels-gebouwen/informatie-epa), and [IPLO new-build energy rules](https://iplo.nl/regelgeving/regels-voor-activiteiten/technische-bouwactiviteit/nieuwbouw/rijksregels/energiezuinigheid/).
-- `POST /api/ledger/jobs/:id/invoices/:invoiceId/payments`
-- `POST /api/ledger/jobs/:id/payments/follow-up`
-- `POST /api/ledger/jobs/:id/payments/:paymentId/follow-up`
-- `POST /api/ledger/jobs/:id/finance-handoffs/prepare`
-- `POST /api/ledger/communications/:id/delivery-receipt`
-
-- `GET /api/operations/export` downloads a SHA-256 protected v2 reconciliation artifact, including opportunities, governed market-fit profiles and assessments, bid/no-bid policies and pursuit decisions, project-control registers, schedule baselines, task dependencies, billing milestones, supplier invoices, and retained supplier-payment evidence. It is human-readable and explicitly non-restorable.
-- `POST /api/operations/exports/validate` verifies the v2 export structure and checksum. Ordinary JSON mutations remain limited to 2 MB; this owner-authorized reconciliation endpoint uses a separate 16 MB ceiling so a retained operational export can be checked without relaxing the rest of the API.
-- `POST /api/operations/backup` creates a signed v3 recovery package in a hidden staging directory and publishes it atomically only after the SQLite, evidence, export, and manifest files are complete. Failed staging data is removed and never appears in the retained backup register.
-- `GET /api/operations/backups`
-- `GET /api/operations/backups/:backupId/verify`
-- Owner-only `GET /api/operations/backups/:backupId/download` streams the verified SQLite and evidence package as `tar.gz`.
-- `POST /api/operations/restore/validate` with `{ "backupId": "..." }` verifies the retained backup checksums and SQLite restore readiness. Summary exports are rejected.
-- `GET /api/operations/operators` returns a redacted owner-only register containing deployment-controlled and managed principals. Owner-only create, rotate, and deactivate routes under `/api/operations/operators` return generated access keys once, revoke active sessions on access changes, and never return retained hashes or fingerprints.
-- `GET /api/operations/audit-integrity` verifies the complete retained audit chain against its atomic head and returns `503` when any event or sequence no longer matches.
-- Owner-only `GET /api/ledger/audit` returns newest-first, sequence-cursor pages of retained audit events with chain hashes. Use `beforeSequence` for the next page; exact `jobId`, `entityType`, `entityId`, `action`, and `actor` filters, `from` and `until` date bounds, free-text `query`, and `includeFacets=true` support investigation without loading the full ledger.
-- `GET /api/operations/capabilities`
-- Owner-only `GET /api/operations/reset-qa/preview` returns the complete eligible local-ledger membership, bounded samples, counts, and a deterministic `planHash` without mutating records.
-- Owner-only `POST /api/operations/reset-qa` requires `{ "confirmation": "RESET_QA", "planHash": "...", "reason": "..." }`. It rejects an empty or changed plan, creates and independently verifies a local recovery package, rechecks membership inside one transaction, then archives eligible QA/demo jobs and non-won opportunities, retires matching workers and tools, rejects their pending approvals, and records one audit event. Verified wins remain immutable; hosted mode requires a provider recovery point instead.
-- `GET /api/readiness`
-- `GET /api/health/ready` exposes only a minimal orchestration status; hosted startup and readiness require a successful bounded object-storage PUT/GET/DELETE check inside the configured private prefix.
-
-Evidence content is retrieved through `GET /api/ledger/documents/:id/content`, which requires normal dashboard/API authentication and records the access in the ledger audit trail.
-
-`POST /api/ledger/upload` accepts an `Idempotency-Key` header containing 8 to 200 letters, digits, dots, underscores, colons, or hyphens. Clients should reuse the same key only when retrying the exact same evidence payload. Successful replays return `Idempotent-Replayed: true`. The former `/api/upload` route is a non-mutating `410` migration boundary.
-
-`/api/jobs`, `/api/workers`, `/api/tools`, `/api/clients`, `/api/approvals`, `/api/audit`, `/api/communication`, `/api/weather`, `/api/schedule`, `/api/ai/chat`, and `/api/test/notifications` return explicit `410` migration responses. New work must use the ledger API.
+`package.json` declares MIT. A repository-level `LICENSE` file is not currently
+present, so add and review one before relying on that metadata for distribution
+or third-party use.

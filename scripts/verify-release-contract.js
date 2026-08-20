@@ -275,8 +275,8 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
     "app.post('/api/ledger/jobs/:id/risk-register/revisions'",
     "app.post('/api/ledger/jobs/:id/change-orders'",
     "app.post('/api/ledger/jobs/:id/change-orders/:changeOrderId/issue-package'",
-    "app.get('/api/client-portal/:token/change-orders/:changeOrderId/package'",
-    "app.post('/api/client-portal/:token/change-orders/:changeOrderId/responses'",
+    "app.get('/api/client-portal/change-orders/:changeOrderId/package'",
+    "app.post('/api/client-portal/change-orders/:changeOrderId/responses'",
     "app.get('/api/ledger/jobs/:id/pricing-basis'",
     "app.post('/api/ledger/jobs/:id/pricing-decisions'",
     "app.post('/api/ledger/upload'",
@@ -497,7 +497,7 @@ function verifyReleaseContract(root = path.resolve(__dirname, '..')) {
       failures.push(`Persisted locale contract is missing required behavior: ${localeRequirement}`);
     }
   }
-  for (const localeEndpoint of ['/api/preferences', '/api/client-portal/:token/preferences']) {
+  for (const localeEndpoint of ['/api/preferences', '/api/client-portal/preferences']) {
     if (!serverSource.includes(localeEndpoint)) failures.push(`Persisted locale endpoint is missing: ${localeEndpoint}`);
   }
   for (const privacyRequirement of [

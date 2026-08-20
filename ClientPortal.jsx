@@ -33,6 +33,27 @@ function createResponseId() {
   return `response-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
 }
 
+function portalRequest(token, path = '', options = {}) {
+  return fetch(`/api/client-portal${path}`, {
+    ...options,
+    headers: {
+      Authorization: `Bearer ${token}`,
+      ...(options.headers || {})
+    }
+  })
+}
+
+function attachmentFilename(response, fallback) {
+  const disposition = response.headers.get('content-disposition') || ''
+  const encoded = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1]
+  if (!encoded) return fallback
+  try {
+    return decodeURIComponent(encoded)
+  } catch {
+    return fallback
+  }
+}
+
 function formatPortalMoney(value, currency = 'EUR', locale = DEFAULT_PORTAL_LOCALE) {
   try {
     return new Intl.NumberFormat(locale, { style: 'currency', currency }).format(Number(value || 0))
@@ -133,7 +154,7 @@ function VariationResponseState({ response, t }) {
   </div>
 }
 
-function ClientVariation({ variation, token, draft, result, submitting, onDraftChange, onSubmit, locale, t }) {
+function ClientVariation({ variation, draft, result, submitting, downloading, onDownload, onDraftChange, onSubmit, locale, t }) {
   const identity = `${variation.variationNumber || t('Variatie')} / R${variation.revisionNumber || 1}`
   const responseDueAt = variation.formalControl?.responseDueAt
   return <article className="client-portal-selection client-portal-variation">
@@ -147,7 +168,7 @@ function ClientVariation({ variation, token, draft, result, submitting, onDraftC
       <span><small>{t('Planning')}</small><strong>{Number(variation.scheduleDeltaDays || 0) === 0 ? t('Geen wijziging') : t('{days} kalenderdag(en)', { days: variation.scheduleDeltaDays })}</strong></span>
       <span><small>{t('Type')}</small><strong>{formatPortalStatus(variation.formalControl?.variationType, locale, t('scopewijziging'))}</strong></span>
     </div>
-    <a className="client-variation-download" href={`/api/client-portal/${encodeURIComponent(token)}/change-orders/${encodeURIComponent(variation.id)}/package`}><Download size={16} />{t('Download genummerd voorstel')}</a>
+    <button type="button" className="client-variation-download" disabled={downloading} onClick={() => onDownload(variation)}><Download size={16} />{downloading ? t('Download voorbereiden...') : t('Download genummerd voorstel')}</button>
     <VariationResponseState response={variation.response} t={t} />
     {result ? <p className="client-variation-result" role="status" aria-live="polite">{result}</p> : null}
     {variation.responseAllowed && draft ? <form className="client-selection-form" onSubmit={event => onSubmit(event, variation)}>
@@ -188,6 +209,7 @@ export default function ClientPortal() {
   const [variationDrafts, setVariationDrafts] = useState({})
   const [variationResults, setVariationResults] = useState({})
   const [variationSubmitting, setVariationSubmitting] = useState('')
+  const [variationDownloading, setVariationDownloading] = useState('')
   const [feedbackDraft, setFeedbackDraft] = useState(() => emptyFeedbackDraft())
   const [feedbackSubmitted, setFeedbackSubmitted] = useState(false)
   const [feedbackSubmitting, setFeedbackSubmitting] = useState(false)
@@ -232,7 +254,7 @@ export default function ClientPortal() {
     const controller = new AbortController()
     const loadPortal = async () => {
       try {
-        const response = await fetch(`/api/client-portal/${encodeURIComponent(token)}`, { signal: controller.signal })
+        const response = await portalRequest(token, '', { signal: controller.signal })
         const payload = await response.json().catch(() => ({}))
         if (!response.ok) throw new Error(payload?.error?.message || portalText(DEFAULT_PORTAL_LOCALE, 'Deze projectlink is niet beschikbaar.'))
         const retainedLocale = normalizeLocale(payload.portal?.locale, DEFAULT_PORTAL_LOCALE)
@@ -266,7 +288,7 @@ export default function ClientPortal() {
     setLocale(normalized)
     setLocaleSaving(true)
     try {
-      const response = await fetch(`/api/client-portal/${encodeURIComponent(token)}/preferences`, {
+      const response = await portalRequest(token, '/preferences', {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ locale: normalized })
@@ -296,7 +318,7 @@ export default function ClientPortal() {
     setSelectionSubmitting(selection.id)
     setSelectionResults(current => ({ ...current, [selection.id]: t('Uw reactie wordt opgeslagen...') }))
     try {
-      const response = await fetch(`/api/client-portal/${encodeURIComponent(token)}/selections/${encodeURIComponent(selection.id)}/responses`, {
+      const response = await portalRequest(token, `/selections/${encodeURIComponent(selection.id)}/responses`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(draft)
@@ -333,7 +355,7 @@ export default function ClientPortal() {
     setVariationSubmitting(variation.id)
     setVariationResults(current => ({ ...current, [variation.id]: t('Uw besluit wordt veilig opgeslagen...') }))
     try {
-      const response = await fetch(`/api/client-portal/${encodeURIComponent(token)}/change-orders/${encodeURIComponent(variation.id)}/responses`, {
+      const response = await portalRequest(token, `/change-orders/${encodeURIComponent(variation.id)}/responses`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(draft)
@@ -355,13 +377,39 @@ export default function ClientPortal() {
     }
   }
 
+  async function downloadVariationPackage(variation) {
+    if (variationDownloading) return
+    setVariationDownloading(variation.id)
+    setVariationResults(current => ({ ...current, [variation.id]: t('Download wordt voorbereid...') }))
+    try {
+      const response = await portalRequest(token, `/change-orders/${encodeURIComponent(variation.id)}/package`)
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}))
+        throw new Error(payload?.error?.message || t('Het voorstel kon niet worden gedownload.'))
+      }
+      const objectUrl = URL.createObjectURL(await response.blob())
+      const anchor = document.createElement('a')
+      anchor.href = objectUrl
+      anchor.download = attachmentFilename(response, `${variation.variationNumber || 'variation'}-R${variation.revisionNumber || 1}.html`)
+      document.body.append(anchor)
+      anchor.click()
+      anchor.remove()
+      URL.revokeObjectURL(objectUrl)
+      setVariationResults(current => ({ ...current, [variation.id]: t('Download gestart.') }))
+    } catch (requestError) {
+      setVariationResults(current => ({ ...current, [variation.id]: requestError.message || t('Het voorstel kon niet worden gedownload.') }))
+    } finally {
+      setVariationDownloading('')
+    }
+  }
+
   async function submitMessage(event) {
     event.preventDefault()
     if (!body.trim() || submitting) return
     setSubmitting(true)
     setMessageResult(t('Bericht wordt opgeslagen...'))
     try {
-      const response = await fetch(`/api/client-portal/${encodeURIComponent(token)}/messages`, {
+      const response = await portalRequest(token, '/messages', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ subject: subject.trim(), body: body.trim() })
@@ -383,7 +431,7 @@ export default function ClientPortal() {
     setFeedbackSubmitting(true)
     setFeedbackResult(t('Uw feedback wordt veilig opgeslagen...'))
     try {
-      const response = await fetch(`/api/client-portal/${encodeURIComponent(token)}/feedback`, {
+      const response = await portalRequest(token, '/feedback', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(feedbackDraft)
@@ -463,10 +511,11 @@ export default function ClientPortal() {
             {job.variations?.length ? job.variations.map(variation => <ClientVariation
               key={variation.id}
               variation={variation}
-              token={token}
               draft={variationDrafts[variation.id]}
               result={variationResults[variation.id] || ''}
               submitting={variationSubmitting === variation.id}
+              downloading={variationDownloading === variation.id}
+              onDownload={downloadVariationPackage}
               onDraftChange={updateVariationDraft}
               onSubmit={submitVariationResponse}
               locale={locale}

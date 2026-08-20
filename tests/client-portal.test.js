@@ -12,9 +12,15 @@ process.env.UPLOAD_DIR = path.join(stateDirectory, 'uploads');
 const app = require('../server');
 
 async function request(baseUrl, route, options = {}) {
-  const response = await fetch(`${baseUrl}${route}`, {
-    headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
-    ...options
+  const { preservePathToken = false, ...requestOptions } = options;
+  const pathToken = String(route).match(/^\/api\/client-portal\/([^/]+)(.*)$/);
+  const portalHeaders = pathToken && !preservePathToken
+    ? { Authorization: `Bearer ${decodeURIComponent(pathToken[1])}` }
+    : {};
+  const requestRoute = pathToken && !preservePathToken ? `/api/client-portal${pathToken[2]}` : route;
+  const response = await fetch(`${baseUrl}${requestRoute}`, {
+    ...requestOptions,
+    headers: { 'Content-Type': 'application/json', ...portalHeaders, ...(requestOptions.headers || {}) }
   });
   const body = await response.json();
   return { response, body };
@@ -73,6 +79,20 @@ test('client portal access is approval-gated, scoped, auditable, and revocable',
   assert.equal(approval.response.status, 200);
   assert.equal(approval.body.approval.status, 'approved');
 
+  const missingPortalToken = await request(baseUrl, '/api/client-portal');
+  assert.equal(missingPortalToken.response.status, 401);
+  assert.equal(missingPortalToken.body.error.code, 'client_portal_token_required');
+
+  const retiredPathToken = await request(baseUrl, `/api/client-portal/${created.body.access.portalToken}`, { preservePathToken: true });
+  assert.equal(retiredPathToken.response.status, 410);
+  assert.equal(retiredPathToken.body.error.code, 'client_portal_path_token_retired');
+
+  const headerPortal = await request(baseUrl, '/api/client-portal', {
+    headers: { Authorization: `Bearer ${created.body.access.portalToken}` }
+  });
+  assert.equal(headerPortal.response.status, 200);
+  assert.equal(headerPortal.body.job.id, jobId);
+
   const portalLogs = [];
   const originalLog = console.log;
   console.log = (...args) => portalLogs.push(args.join(' '));
@@ -102,7 +122,7 @@ test('client portal access is approval-gated, scoped, auditable, and revocable',
     responseAllowed: true,
     response: null
   });
-  assert.ok(portalLogs.some(line => line.includes('/api/client-portal/[redacted]')));
+  assert.ok(portalLogs.some(line => line.includes('/api/client-portal')));
   assert.equal(portalLogs.some(line => line.includes(created.body.access.portalToken)), false);
 
   const rejectedBodyLogs = [];
@@ -121,7 +141,7 @@ test('client portal access is approval-gated, scoped, auditable, and revocable',
   }
   assert.equal(rejectedBody.response.status, 400);
   assert.equal(rejectedBody.body.error.code, 'invalid_json');
-  assert.ok(rejectedBodyLogs.some(line => line.includes('/api/client-portal/[redacted]/messages')));
+  assert.ok(rejectedBodyLogs.some(line => line.includes('/api/client-portal/messages')));
   assert.equal(rejectedBodyLogs.some(line => line.includes(created.body.access.portalToken)), false);
 
   const portalPreference = await request(baseUrl, `/api/client-portal/${created.body.access.portalToken}/preferences`, {

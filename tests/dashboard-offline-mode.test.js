@@ -528,9 +528,10 @@ test('client success exposes immutable handover readiness, preparation, and down
 });
 
 test('client portal is a scoped React workflow without imperative HTML rendering', () => {
-  assert.match(clientPortalSource, /\/api\/client-portal\/\$\{encodeURIComponent\(token\)\}/);
-  assert.match(clientPortalSource, /\/messages`/);
-  assert.match(clientPortalSource, /\/feedback`/);
+  assert.match(clientPortalSource, /Authorization: `Bearer \$\{token\}`/);
+  assert.match(clientPortalSource, /fetch\(`\/api\/client-portal\$\{path\}`/);
+  assert.match(clientPortalSource, /portalRequest\(token, '\/messages'/);
+  assert.match(clientPortalSource, /portalRequest\(token, '\/feedback'/);
   assert.match(clientPortalSource, /\/selections\/\$\{encodeURIComponent\(selection\.id\)\}\/responses/);
   assert.match(clientPortalSource, /\/change-orders\/\$\{encodeURIComponent\(variation\.id\)\}\/responses/);
   assert.match(clientPortalSource, /\/change-orders\/\$\{encodeURIComponent\(variation\.id\)\}\/package/);
