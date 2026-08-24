@@ -39,7 +39,7 @@ test('operator calculates, approves, and revises a critical-path work plan', asy
   await workPlan.getByRole('button', { name: 'Calculate' }).click();
   await expect(workPlan.getByText('24h', { exact: true })).toHaveCount(2);
   await expect(workPlan.locator('.work-plan-task .tag-red')).toHaveCount(2);
-  await expect(workPlan.getByText('2 tasks', { exact: true })).toBeVisible();
+  await expect(workPlan.getByText('2 tasks', { exact: true })).toHaveCount(2);
 
   await workPlan.getByRole('button', { name: 'Request baseline' }).click();
   await expect(workPlan.getByText('Baseline v1 pending')).toBeVisible();

@@ -36,6 +36,7 @@ const {
   inspectHaiFeedPublication,
   publishHaiFeed
 } = require('./hai-connector');
+const { parseMultipartFormData } = require('./multipart-parser');
 const packageMetadata = require('./package.json');
 
 const app = express();
@@ -75,11 +76,11 @@ if (trustedProxyRaw) {
   app.set('trust proxy', false);
 }
 const hostedDatabaseUrl = runtimeMode === 'hosted' ? String(process.env.CONTRACTOR_AI_DATABASE_URL || '').trim() : '';
-const hostedPublicUrl = String(process.env.CONTRACTOR_AI_PUBLIC_URL || '').trim();
-const hostedPublicUrlDetails = (() => {
-  if (!hostedPublicUrl) return { protocol: '', origin: '', valid: false };
+function parsePublicUrlDetails(value) {
+  const publicUrl = String(value || '').trim();
+  if (!publicUrl) return { protocol: '', origin: '', valid: false };
   try {
-    const url = new URL(hostedPublicUrl);
+    const url = new URL(publicUrl);
     return {
       protocol: url.protocol,
       origin: url.origin,
@@ -88,6 +89,12 @@ const hostedPublicUrlDetails = (() => {
   } catch {
     return { protocol: 'invalid', origin: '', valid: false };
   }
+}
+
+let hostedPublicUrl = String(process.env.CONTRACTOR_AI_PUBLIC_URL || '').trim();
+let hostedPublicUrlDetails = (() => {
+  if (!hostedPublicUrl) return { protocol: '', origin: '', valid: false };
+  return parsePublicUrlDetails(hostedPublicUrl);
 })();
 const hostingProvider = String(process.env.CONTRACTOR_AI_HOSTING_PROVIDER || '').trim();
 const hostingRegion = String(process.env.CONTRACTOR_AI_HOSTING_REGION || '').trim();
@@ -164,7 +171,7 @@ const maxMultipartParts = boundedInteger(process.env.CONTRACTOR_AI_MULTIPART_MAX
 const maxMultipartFields = boundedInteger(process.env.CONTRACTOR_AI_MULTIPART_MAX_FIELDS, 32, 4, 128);
 const maxMultipartHeaderPairs = boundedInteger(process.env.CONTRACTOR_AI_MULTIPART_MAX_HEADER_PAIRS, 16, 4, 64);
 const maxMultipartFieldBytes = boundedInteger(process.env.CONTRACTOR_AI_MULTIPART_MAX_FIELD_BYTES, 65_536, 1_024, 262_144);
-const allowedOrigins = (process.env.CORS_ORIGINS || 'http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173')
+let allowedOrigins = (process.env.CORS_ORIGINS || 'http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173')
   .split(',')
   .map(origin => origin.trim())
   .filter(Boolean);
@@ -738,16 +745,6 @@ async function validateEvidenceUpload(file) {
   return { valid: true };
 }
 
-function sanitizeUploadFilename(value) {
-  const base = path.basename(String(value || 'upload.bin')).replace(/[^\w.\- ]+/g, '_').trim();
-  const normalized = base.replace(/\s+/g, '-').slice(0, 120);
-  return normalized || 'upload.bin';
-}
-
-function safeFieldName(value) {
-  return String(value || '').replace(/[^\w.\-:[\]]+/g, '').slice(0, 120);
-}
-
 class UploadRequestError extends Error {
   constructor(statusCode, code, message, details) {
     super(message);
@@ -775,101 +772,18 @@ function readRequestBuffer(req, limitBytes = maxUploadBytes) {
   });
 }
 
-function parseMultipartDisposition(value = '') {
-  const result = {};
-  for (const part of String(value).split(';')) {
-    const [rawKey, ...rawValue] = part.trim().split('=');
-    if (!rawKey || !rawValue.length) continue;
-    const key = rawKey.trim().toLowerCase();
-    const joined = rawValue.join('=').trim();
-    result[key] = joined.replace(/^"|"$/g, '');
-  }
-  return result;
-}
-
 function parseMultipartBody(buffer, contentType = '') {
-  const boundaryMatch = contentType.match(/boundary=(?:"([^"]+)"|([^;]+))/i);
-  const boundary = boundaryMatch?.[1] || boundaryMatch?.[2];
-  if (!boundary) {
-    throw new UploadRequestError(400, 'missing_multipart_boundary', 'Multipart boundary is missing');
+  try {
+    return parseMultipartFormData(buffer, contentType, {
+      maxParts: maxMultipartParts,
+      maxFields: maxMultipartFields,
+      maxHeaderPairs: maxMultipartHeaderPairs,
+      maxFieldBytes: maxMultipartFieldBytes
+    });
+  } catch (error) {
+    if (error instanceof UploadRequestError) throw error;
+    throw new UploadRequestError(error.statusCode || 400, error.code || 'malformed_multipart_body', error.message || 'Multipart body is malformed.');
   }
-  if (!/^[0-9A-Za-z'()+_,\-./:=?]{12,70}$/.test(boundary)) {
-    throw new UploadRequestError(400, 'invalid_multipart_boundary', 'Multipart boundary syntax or length is invalid');
-  }
-
-  const body = buffer.toString('latin1');
-  const delimiter = `--${boundary}`;
-  let delimiterCount = 0;
-  let delimiterOffset = 0;
-  while ((delimiterOffset = body.indexOf(delimiter, delimiterOffset)) !== -1) {
-    delimiterCount += 1;
-    if (delimiterCount > maxMultipartParts + 1) {
-      throw new UploadRequestError(413, 'multipart_parts_exceeded', `Multipart upload exceeds ${maxMultipartParts} parts`);
-    }
-    delimiterOffset += delimiter.length;
-  }
-  const parts = body.split(delimiter).slice(1, -1);
-  const fields = {};
-  const files = [];
-  let fieldCount = 0;
-
-  for (let rawPart of parts) {
-    if (rawPart.startsWith('\r\n')) rawPart = rawPart.slice(2);
-    if (rawPart.endsWith('\r\n')) rawPart = rawPart.slice(0, -2);
-    const headerEnd = rawPart.indexOf('\r\n\r\n');
-    if (headerEnd === -1) continue;
-
-    const headerLines = rawPart.slice(0, headerEnd).split('\r\n');
-    if (headerLines.length > maxMultipartHeaderPairs) {
-      throw new UploadRequestError(413, 'multipart_headers_exceeded', `Multipart part exceeds ${maxMultipartHeaderPairs} headers`);
-    }
-    const headers = {};
-    for (const line of headerLines) {
-      const separator = line.indexOf(':');
-      if (separator === -1) continue;
-      headers[line.slice(0, separator).trim().toLowerCase()] = line.slice(separator + 1).trim();
-    }
-
-    const disposition = parseMultipartDisposition(headers['content-disposition']);
-    const fieldName = safeFieldName(disposition.name);
-    if (!fieldName) continue;
-
-    const content = rawPart.slice(headerEnd + 4);
-    if (disposition.filename !== undefined) {
-      if (files.length >= 1) {
-        throw new UploadRequestError(413, 'multipart_files_exceeded', 'Evidence upload accepts exactly one file');
-      }
-      const originalName = sanitizeUploadFilename(disposition.filename);
-      const bytes = Buffer.from(content, 'latin1');
-      if (!bytes.length || !originalName) continue;
-      files.push({
-        fieldName,
-        originalName,
-        mimeType: headers['content-type'] || 'application/octet-stream',
-        size: bytes.length,
-        buffer: bytes
-      });
-      continue;
-    }
-
-    fieldCount += 1;
-    if (fieldCount > maxMultipartFields) {
-      throw new UploadRequestError(413, 'multipart_fields_exceeded', `Multipart upload exceeds ${maxMultipartFields} fields`);
-    }
-    if (Buffer.byteLength(content, 'latin1') > maxMultipartFieldBytes) {
-      throw new UploadRequestError(413, 'multipart_field_too_large', `Multipart field exceeds ${maxMultipartFieldBytes} bytes`);
-    }
-    const value = Buffer.from(content, 'latin1').toString('utf8');
-    if (fields[fieldName] === undefined) {
-      fields[fieldName] = value;
-    } else if (Array.isArray(fields[fieldName])) {
-      fields[fieldName].push(value);
-    } else {
-      fields[fieldName] = [fields[fieldName], value];
-    }
-  }
-
-  return { fields, files };
 }
 
 async function storeUploadedFile(file) {
@@ -9645,6 +9559,19 @@ app.use((error, req, res, next) => {
   return sendError(req, res, 500, 'internal_error', 'Unexpected server error', serializeError(error));
 });
 
+function attachPublicOrigin(publicUrl) {
+  const details = parsePublicUrlDetails(publicUrl);
+  if (!details.valid || details.protocol !== 'https:') {
+    throw new Error('The tunnel public origin must be a valid HTTPS origin.');
+  }
+  hostedPublicUrl = details.origin;
+  hostedPublicUrlDetails = details;
+  allowedOrigins = Array.from(new Set([...allowedOrigins, details.origin]));
+  process.env.CONTRACTOR_AI_PUBLIC_URL = details.origin;
+  process.env.CORS_ORIGINS = allowedOrigins.join(',');
+  return details.origin;
+}
+
 async function startDirectServer(options = {}) {
   const listenPort = options.port ?? port;
   const listenHost = String(options.host ?? configuredBindHost).trim() || undefined;
@@ -9739,6 +9666,7 @@ function shutdownRuntime({ server = directServer, signal = 'shutdown', timeoutMs
 
 app.locals.runtimeControl = Object.freeze({
   configureHttpServer,
+  attachPublicOrigin,
   start: options => startDirectServer(options),
   shutdown: options => shutdownRuntime(options),
   schedulerTimerCount: () => autonomousSchedulerTimers.size,

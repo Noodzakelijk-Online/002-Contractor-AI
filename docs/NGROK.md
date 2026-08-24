@@ -23,8 +23,10 @@ Optional settings:
   ngrok edge.
 - `PORT`: local port, default `3000`.
 
-The launcher opens ngrok first, validates that it returned a clean HTTPS origin,
-then configures exact CORS, loopback proxy trust, required Contractor.AI
+The launcher starts Contractor.AI on the loopback port first, then opens ngrok and
+attaches the returned HTTPS origin to the already-running runtime. This makes a
+public ingress impossible when the local process cannot own its port. It validates
+the origin, configures exact CORS, loopback proxy trust, required Contractor.AI
 authentication, and a `127.0.0.1` server bind. It does not announce success merely
 because ngrok returned a URL. It verifies, in order:
 

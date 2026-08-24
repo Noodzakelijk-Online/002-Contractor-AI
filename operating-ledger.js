@@ -5,6 +5,7 @@ const { DatabaseSync } = require('node:sqlite');
 const { Graph, alg: graphAlgorithms } = require('@dagrejs/graphlib');
 const { PostgresSyncDatabase } = require('./postgres-sync-database');
 const { getFrameworkDefinition, listFrameworkCatalog } = require('./framework-catalog');
+const { encodeCsvCell } = require('./csv-safety');
 
 const DASHBOARD_SUMMARY_CACHE_TTL_MS = 2_000;
 
@@ -32890,17 +32891,16 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         const approval = existing.approval_id ? this.mapApproval(this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(existing.approval_id)) : null;
         return { report, approval, replayed: true, externalCommitments: 0, certificationClaimed: false };
       }
-      const csvCell = value => {
-        const text = String(value ?? '');
-        return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
-      };
       const columns = ['activity_id', 'activity_date', 'category', 'ghg_scope', 'description', 'quantity', 'unit', 'factor_kg_co2e_per_unit', 'emissions_kg_co2e', 'factor_source', 'factor_reference', 'evidence_reference', 'approval_id'];
       const csvRows = [columns, ...register.sourceBasis.map(activity => [
         activity.id, activity.activityDate, activity.category, activity.ghgScope, activity.description || '',
         activity.quantity, activity.unit, activity.emissionFactor, activity.emissionsKgCo2e,
         activity.factorSource, activity.factorReference, activity.evidenceReference, activity.approvalId
       ])];
-      const csvContent = `\uFEFF${csvRows.map(row => row.map(csvCell).join(',')).join('\r\n')}\r\n`;
+      const numericColumns = new Set([5, 7, 8]);
+      const csvContent = `\uFEFF${csvRows.map((row, rowIndex) => row.map((value, columnIndex) => encodeCsvCell(value, {
+        type: rowIndex > 0 && numericColumns.has(columnIndex) ? 'number' : 'text'
+      })).join(',')).join('\r\n')}\r\n`;
       const csvChecksum = sha256Text(csvContent);
       const snapshot = {
         format: ENVIRONMENTAL_REPORT_FORMAT,
@@ -37284,18 +37284,13 @@ ${documentReference}  <cac:BillingReference><cac:InvoiceDocumentReference><cbc:I
         }
         return { export: retained, replayed: true, externalDeliveryInitiated: false };
       }
-      const csvCell = value => {
-        const raw = String(value ?? '');
-        const protectedValue = /^[=+\-@]/.test(raw) ? `'${raw}` : raw;
-        return `"${protectedValue.replace(/"/g, '""')}"`;
-      };
       const columns = ['Worker ID', 'Worker name', 'Period start', 'Period end', 'Total hours', 'Billable hours', 'Non-billable hours', 'Labor cost', 'Currency', 'Timesheet ID', 'Version', 'Source hash'];
       const csvRows = [columns, ...timesheets.map(item => [
         item.workerId, item.workerName, item.periodStart, item.periodEnd, item.totalHours.toFixed(2), item.billableHours.toFixed(2),
         roundQuantity(item.totalHours - item.billableHours).toFixed(2), item.laborCost.toFixed(2), item.currency,
         item.id, item.versionNumber, item.sourceHash
       ])];
-      const csvContent = `\uFEFF${csvRows.map(csvRow => csvRow.map(csvCell).join(',')).join('\r\n')}\r\n`;
+      const csvContent = `\uFEFF${csvRows.map(csvRow => csvRow.map(value => encodeCsvCell(value, { quote: true })).join(',')).join('\r\n')}\r\n`;
       const csvChecksum = sha256Text(csvContent);
       const snapshot = {
         format: TIMESHEET_EXPORT_FORMAT, periodStart, periodEnd, sourceHash, csvChecksum,

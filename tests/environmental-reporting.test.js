@@ -155,6 +155,33 @@ test('environmental reports freeze current approved evidence and retain historic
   assert.equal(ledger.diagnose().valid, true);
 });
 
+test('environmental CSV exports neutralize formula-like operator provenance', t => {
+  const { ledger, job, worker } = fixture(t, 'csv-safety');
+  const created = ledger.createEnvironmentalActivity(job.id, {
+    ...activityPayload(worker, 'CSV-SAFETY'),
+    description: '=HYPERLINK("https://unsafe.example")',
+    factorSource: '@operator-factor-library',
+    factorReference: '-factor-reference',
+    evidenceReference: '+fuel-ticket-reference'
+  }, { actor: 'field_worker' });
+  ledger.resolveApproval(created.approval.id, {
+    status: 'approved',
+    resolvedBy: 'environmental_approver',
+    reason: 'Formula-like text was reviewed as literal retained provenance.'
+  });
+  const report = ledger.requestEnvironmentalReport(job.id, {}, { actor: 'office_operator' });
+  ledger.resolveApproval(report.approval.id, {
+    status: 'approved',
+    resolvedBy: 'environmental_approver',
+    reason: 'Literal spreadsheet-safe CSV provenance was reviewed.'
+  });
+  const content = ledger.getEnvironmentalReportContent(report.report.id).content;
+  assert.match(content, /'=HYPERLINK/);
+  assert.match(content, /'@operator-factor-library/);
+  assert.match(content, /'-factor-reference/);
+  assert.match(content, /'\+fuel-ticket-reference/);
+});
+
 test('environmental reversal is compensating and rejected reversal restores recognition', t => {
   const { ledger, job, worker } = fixture(t, 'reversal');
   const created = ledger.createEnvironmentalActivity(job.id, activityPayload(worker, 'REV-001'), { actor: 'field_worker' });

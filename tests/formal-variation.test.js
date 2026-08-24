@@ -114,7 +114,8 @@ test('formal variations preserve exact replay, client revision control, and veri
 
   const firstIssue = issueVariation(ledger, job.id, first);
   assert.match(firstIssue.issueReference, /^CO-\d{4}-000001$/);
-  const access = ledger.createClientPortalAccess(job.id, { expiresAt: '2026-08-21T12:00:00.000Z' }, { actor: 'office' });
+  const portalExpiry = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+  const access = ledger.createClientPortalAccess(job.id, { expiresAt: portalExpiry }, { actor: 'office' });
   ledger.resolveApproval(access.approval.id, { status: 'approved', resolvedBy: 'portal-approver' });
   const portal = ledger.getClientPortalSnapshot(access.portalToken);
   assert.equal(portal.job.variations.length, 1);

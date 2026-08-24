@@ -437,6 +437,7 @@ backups, or runtime data.
 | --- | --- |
 | `CONTRACTOR_AI_HAI_FEED_PATH` | Absolute path for atomic read-only HAI feed publication |
 | `NGROK_AUTHTOKEN` | ngrok agent credential used only by the verified tunnel launcher |
+| `WEATHER_PROVIDER_MAX_RESPONSE_BYTES` | Maximum decoded JSON response size accepted from the weather provider |
 | `CONTRACTOR_AI_VERIFIED_INTEGRATIONS` | Provider identifiers permitted for delivery receipts |
 | `CONTRACTOR_AI_AUTONOMOUS_SCHEDULER_ENABLED` | Opt in to durable internal scheduler cycles |
 | `CONTRACTOR_AI_AUTONOMOUS_INTERVAL_SECONDS` | Scheduler poll interval |

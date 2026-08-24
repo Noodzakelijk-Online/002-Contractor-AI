@@ -1,5 +1,7 @@
 const DEFAULT_GEOCODING_ENDPOINT = 'https://geocoding-api.open-meteo.com/v1/search';
 const DEFAULT_FORECAST_ENDPOINT = 'https://api.open-meteo.com/v1/forecast';
+const DEFAULT_MAX_RESPONSE_BYTES = 256 * 1024;
+const { BoundedJsonResponseError, readBoundedJsonResponse } = require('./bounded-json');
 
 class WeatherProviderError extends Error {
   constructor(message, { code = 'weather_provider_unavailable', statusCode = 503, cause } = {}) {
@@ -71,6 +73,7 @@ class OpenMeteoWeatherService {
     this.geocodingEndpoint = options.geocodingEndpoint || process.env.WEATHER_GEOCODING_ENDPOINT || DEFAULT_GEOCODING_ENDPOINT;
     this.forecastEndpoint = options.forecastEndpoint || process.env.WEATHER_FORECAST_ENDPOINT || DEFAULT_FORECAST_ENDPOINT;
     this.timeoutMs = Math.max(1000, Number(options.timeoutMs || process.env.WEATHER_PROVIDER_TIMEOUT_MS || 8000));
+    this.maxResponseBytes = Math.max(1024, Number(options.maxResponseBytes || process.env.WEATHER_PROVIDER_MAX_RESPONSE_BYTES || DEFAULT_MAX_RESPONSE_BYTES));
   }
 
   async fetchJson(url) {
@@ -87,7 +90,19 @@ class OpenMeteoWeatherService {
       if (!response?.ok) {
         throw new WeatherProviderError(`Live weather provider returned ${response?.status || 'an invalid response'}.`, { code: 'weather_provider_failed' });
       }
-      return await response.json();
+      try {
+        return await readBoundedJsonResponse(response, { maxBytes: this.maxResponseBytes });
+      } catch (error) {
+        if (error instanceof BoundedJsonResponseError) {
+          const code = {
+            json_response_content_type_invalid: 'weather_provider_invalid_content_type',
+            json_response_invalid: 'weather_provider_invalid_response',
+            json_response_too_large: 'weather_provider_response_too_large'
+          }[error.code] || 'weather_provider_response_invalid';
+          throw new WeatherProviderError('Live weather provider returned an invalid bounded JSON response.', { code, statusCode: 502, cause: error });
+        }
+        throw error;
+      }
     } catch (error) {
       if (error instanceof WeatherProviderError) throw error;
       throw new WeatherProviderError('Live weather provider could not be reached. No weather assessment was recorded.', {
@@ -197,6 +212,7 @@ class OpenMeteoWeatherService {
 module.exports = {
   DEFAULT_FORECAST_ENDPOINT,
   DEFAULT_GEOCODING_ENDPOINT,
+  DEFAULT_MAX_RESPONSE_BYTES,
   OpenMeteoWeatherService,
   WeatherProviderError,
   weatherCondition,

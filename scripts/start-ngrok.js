@@ -1,4 +1,5 @@
 const { applyStandaloneEnvironment } = require('../standalone-runtime');
+const { readBoundedJsonResponse } = require('../bounded-json');
 
 const DEFAULT_TUNNEL_READINESS_TIMEOUT_MS = 15_000;
 const DEFAULT_TUNNEL_READINESS_RETRY_MS = 250;
@@ -51,23 +52,30 @@ function ngrokForwardOptions(environment, port) {
   return options;
 }
 
-function applyTunnelEnvironment(environment, publicUrl, port) {
-  const url = new URL(publicUrl);
-  if (url.protocol !== 'https:' || url.username || url.password || url.pathname !== '/' || url.search || url.hash) {
-    throw new Error('ngrok did not return a valid HTTPS origin.');
-  }
+function applyTunnelLocalEnvironment(environment, port) {
   Object.assign(environment, {
     NODE_ENV: 'production',
     PORT: String(port),
     CONTRACTOR_AI_RUNTIME_MODE: 'local',
     CONTRACTOR_AI_REQUIRE_AUTH: 'true',
     CONTRACTOR_AI_BIND_HOST: '127.0.0.1',
-    CONTRACTOR_AI_PUBLIC_URL: url.origin,
     CONTRACTOR_AI_TRUST_PROXY: 'loopback',
     CONTRACTOR_AI_NGROK_ACTIVE: 'verifying',
-    CORS_ORIGINS: url.origin
+    CORS_ORIGINS: `http://localhost:${port},http://127.0.0.1:${port}`
   });
   delete environment.CONTRACTOR_AI_NGROK_VERIFIED_AT;
+}
+
+function applyTunnelEnvironment(environment, publicUrl, port) {
+  const url = new URL(publicUrl);
+  if (url.protocol !== 'https:' || url.username || url.password || url.pathname !== '/' || url.search || url.hash) {
+    throw new Error('ngrok did not return a valid HTTPS origin.');
+  }
+  applyTunnelLocalEnvironment(environment, port);
+  Object.assign(environment, {
+    CONTRACTOR_AI_PUBLIC_URL: url.origin,
+    CORS_ORIGINS: url.origin
+  });
   return url.origin;
 }
 
@@ -82,18 +90,11 @@ function readinessError(message, cause) {
 }
 
 async function readBoundedJson(response) {
-  const contentLength = Number(response.headers?.get?.('content-length') || 0);
-  if (contentLength > MAX_TUNNEL_READINESS_RESPONSE_BYTES) {
-    throw readinessError('Tunnel readiness returned an oversized response.');
-  }
-  const text = await response.text();
-  if (Buffer.byteLength(text) > MAX_TUNNEL_READINESS_RESPONSE_BYTES) {
-    throw readinessError('Tunnel readiness returned an oversized response.');
-  }
   try {
-    return JSON.parse(text);
+    return await readBoundedJsonResponse(response, { maxBytes: MAX_TUNNEL_READINESS_RESPONSE_BYTES });
   } catch (error) {
-    throw readinessError('Tunnel readiness did not return JSON.', error);
+    if (error.code === 'json_response_too_large') throw readinessError('Tunnel readiness returned an oversized response.', error);
+    throw readinessError('Tunnel readiness did not return bounded JSON.', error);
   }
 }
 
@@ -186,10 +187,12 @@ async function startTunnel(options = {}) {
   let server;
   let app;
   try {
-    listener = await ngrok.forward(ngrokForwardOptions(environment, port));
-    const publicUrl = applyTunnelEnvironment(environment, listener.url(), port);
+    applyTunnelLocalEnvironment(environment, port);
     app = options.app || require('../server');
     server = await app.locals.runtimeControl.start({ host: '127.0.0.1', port });
+    listener = await ngrok.forward(ngrokForwardOptions(environment, port));
+    const publicUrl = applyTunnelEnvironment(environment, listener.url(), port);
+    app.locals.runtimeControl.attachPublicOrigin?.(publicUrl);
     const readinessOptions = {
       fetchImpl: options.fetchImpl,
       timeoutMs: options.readinessTimeoutMs,

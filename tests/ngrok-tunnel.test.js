@@ -19,7 +19,7 @@ function jsonResponse(body, status = 200) {
   return {
     ok: status >= 200 && status < 300,
     status,
-    headers: { get: () => null },
+    headers: { get: name => name.toLowerCase() === 'content-type' ? 'application/json; charset=utf-8' : null },
     text: async () => JSON.stringify(body)
   };
 }
@@ -90,7 +90,7 @@ test('ngrok readiness rejects redirects, oversized bodies, and unexpected runtim
     fetchImpl: async () => ({
       ok: true,
       status: 200,
-      headers: { get: () => String(300 * 1024) },
+      headers: { get: name => name.toLowerCase() === 'content-length' ? String(300 * 1024) : 'application/json' },
       text: async () => '{}'
     })
   }), /could not be verified/);
@@ -114,6 +114,29 @@ test('ngrok startup fails closed before opening a listener without owner authent
   }), 'principal-owner-token-at-least-32-characters');
 });
 
+test('ngrok does not open ingress when the loopback application cannot own its port', async () => {
+  let forwardCalls = 0;
+  const environment = {
+    NGROK_AUTHTOKEN: 'ngrok-token-at-least-32-characters',
+    CONTRACTOR_AI_AUTH_TOKEN: 'contractor-owner-token-at-least-32-characters',
+    PORT: '3212'
+  };
+  const app = {
+    locals: {
+      runtimeControl: {
+        start: async () => { throw new Error('EADDRINUSE: address already in use'); },
+        shutdown: async () => {}
+      }
+    }
+  };
+  await assert.rejects(startTunnel({
+    environment,
+    app,
+    ngrok: { forward: async () => { forwardCalls += 1; } }
+  }), /EADDRINUSE/);
+  assert.equal(forwardCalls, 0);
+});
+
 test('ngrok tunnel verifies local and public readiness before announcement and closes ingress first', async () => {
   const events = [];
   const environment = {
@@ -128,7 +151,16 @@ test('ngrok tunnel verifies local and public readiness before announcement and c
   const app = {
     locals: {
       runtimeControl: {
-        start: async options => { events.push(`server-start:${options.host}:${options.port}`); return { listening: true }; },
+        start: async options => {
+          assert.equal(environment.NODE_ENV, 'production');
+          assert.equal(environment.CONTRACTOR_AI_REQUIRE_AUTH, 'true');
+          assert.equal(environment.CONTRACTOR_AI_BIND_HOST, '127.0.0.1');
+          assert.equal(environment.CONTRACTOR_AI_TRUST_PROXY, 'loopback');
+          assert.equal(environment.CONTRACTOR_AI_NGROK_ACTIVE, 'verifying');
+          events.push(`server-start:${options.host}:${options.port}`);
+          return { listening: true };
+        },
+        attachPublicOrigin: origin => { events.push(`origin-attached:${origin}`); },
         shutdown: async () => { events.push('server-stop'); }
       }
     }
@@ -152,8 +184,9 @@ test('ngrok tunnel verifies local and public readiness before announcement and c
     }
   });
   assert.deepEqual(events, [
-    'listener-open',
     'server-start:127.0.0.1:3210',
+    'listener-open',
+    'origin-attached:https://contractor-test.ngrok.app',
     'local-ready',
     'public-denied',
     'public-pending',
@@ -188,6 +221,7 @@ test('ngrok startup closes public ingress and the loopback runtime when verifica
     locals: {
       runtimeControl: {
         start: async () => { events.push('server-start'); return { listening: true }; },
+        attachPublicOrigin: origin => { events.push(`origin-attached:${origin}`); },
         shutdown: async () => { events.push('server-stop'); }
       }
     }
@@ -196,7 +230,7 @@ test('ngrok startup closes public ingress and the loopback runtime when verifica
   await assert.rejects(startTunnel({
     environment,
     app,
-    ngrok: { forward: async () => listener },
+    ngrok: { forward: async () => { events.push('listener-open'); return listener; } },
     readinessTimeoutMs: 10,
     readinessRetryMs: 1,
     fetchImpl: async (url, options) => {
@@ -206,7 +240,7 @@ test('ngrok startup closes public ingress and the loopback runtime when verifica
     }
   }), error => error.code === 'ngrok_readiness_verification_failed');
 
-  assert.deepEqual(events, ['server-start', 'listener-close', 'server-stop']);
+  assert.deepEqual(events, ['server-start', 'listener-open', 'origin-attached:https://contractor-failed.ngrok.app', 'listener-close', 'server-stop']);
   assert.equal(environment.CONTRACTOR_AI_NGROK_ACTIVE, 'false');
   assert.equal(environment.CONTRACTOR_AI_NGROK_VERIFIED_AT, undefined);
 });
