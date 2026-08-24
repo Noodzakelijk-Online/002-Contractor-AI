@@ -7,10 +7,13 @@ const releaseRoot = path.join(root, 'release');
 const target = path.join(releaseRoot, 'ContractorAI-windows-x64');
 const runtimeFiles = [
   'backup-manifest.js',
+  'bounded-json.js',
   'contractor-framework-catalog.json',
+  'csv-safety.js',
   'evidence-storage.js',
   'framework-catalog.js',
   'hai-connector.js',
+  'multipart-parser.js',
   'operating-ledger.js',
   'package.json',
   'package-lock.json',

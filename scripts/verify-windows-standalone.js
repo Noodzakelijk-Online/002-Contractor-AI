@@ -92,7 +92,7 @@ function jsonResponse(body, status = 200) {
   return {
     ok: status >= 200 && status < 300,
     status,
-    headers: { get: () => null },
+    headers: { get: name => String(name).toLowerCase() === 'content-type' ? 'application/json' : null },
     text: async () => JSON.stringify(body)
   };
 }
@@ -161,7 +161,7 @@ async function verifyPackagedTunnelLifecycle(ownerToken) {
   assert.equal(environment.CONTRACTOR_AI_NGROK_ACTIVE, 'true');
   assert.match(environment.CONTRACTOR_AI_NGROK_VERIFIED_AT, /^\d{4}-\d{2}-\d{2}T/);
   await packagedTunnel.stopTunnel(runtime, 'windows-package-test');
-  assert.deepEqual(events, ['listener-open', 'server-start', 'listener-close', 'server-stop']);
+  assert.deepEqual(events, ['server-start', 'listener-open', 'listener-close', 'server-stop']);
   assert.equal(environment.CONTRACTOR_AI_NGROK_ACTIVE, 'false');
   return true;
 }
